@@ -1,0 +1,10 @@
+# torch/torchaudio are installed first from the cu124 index (see Dockerfile).
+# faster-qwen3-tts runs Qwen3-TTS with CUDA graphs (stock qwen-tts was 7x slower than real time here).
+faster-qwen3-tts==0.5.4
+transformers==5.15.1   # 5.20 breaks qwen-tts-hf (MimiConfig.rope_theta)
+faster-whisper==1.2.1
+av==16.0.1             # faster-whisper 1.2.1 passes metadata_errors, removed in PyAV 17+
+soundfile
+fastapi
+uvicorn
+python-multipart

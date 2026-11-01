@@ -1,0 +1,86 @@
+# Laika stack. Docs: README.md, docs/architecture.md (services), docs/memory.md, docs/API.md.
+# Only 127.0.0.1 ports are published; Dasha reaches the app through `tailscale serve`.
+name: laika
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  voice:
+    image: local/laika-voice:0.2
+    build: ./voice
+    restart: unless-stopped
+    <<: *gpu
+    environment:
+      TTS_MODEL: Qwen/Qwen3-TTS-12Hz-0.6B-Base
+      TTS_DTYPE: bfloat16   # fp16 overflows (NaN) on Turing; bf16 is emulated but stable
+      TTS_VRAM_FRACTION: "0.5"
+      TTS_DECODE_CHUNK: "24"
+      TTS_DECODE_CONTEXT: "12"
+      STT_MODEL: large-v3-turbo
+      STT_COMPUTE: int8
+      STT_THREADS: "6"
+      STT_BEAM: "1"
+      DEFAULT_VOICE: neighbor   # VoiceStudio's "The Neighbor" recreated with OmniVoice (seed 42)
+    volumes:
+      - ./models/voice:/models/voice
+      - ./models/hf-cache:/models/hf-cache
+    ports:
+      - "127.0.0.1:8082:8000"   # debug/tests only
+    mem_limit: 5g
+
+  llm:
+    image: local/llama.cpp:server-cuda12.4-sm75
+    restart: unless-stopped
+    <<: *gpu
+    depends_on:
+      voice:
+        condition: service_healthy
+    volumes:
+      - ./models/llm:/models:ro
+    ports:
+      - "127.0.0.1:8081:8080"   # debug UI/API
+    # P0.5: Gemma 4 26B-A4B ("Kimi-style"): attention on the GPU, all MoE experts in RAM (--cpu-moe).
+    # Measured 17-20 tok/s next to the voice (docs/BENCHMARKS.md P0.4). -ngl is left to --fit.
+    # P3.1 (DECISIONS D15): no host-RAM prompt cache (the defaults kept 2-3.4 GB per conversation in RAM;
+    # slots keep their own cache and the app replays prompts exactly) and only 4 SWA checkpoints per slot.
+    command: >-
+      -m /models/gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf
+      --cpu-moe -c 20480 --parallel 2 -b 1024 -ub 1024
+      -fa on -ctk q8_0 -ctv q8_0 --jinja -t 6 --metrics
+      --cache-ram 0 --ctx-checkpoints 4
+      --chat-template-kwargs '{"enable_thinking":false}'
+
+  embed:
+    image: local/llama.cpp:server-cuda12.4-sm75   # no GPU reserved: runs on CPU
+    profiles: [memory]   # started in Phase 3 (second brain); saves ~0.7 GB RAM until then
+    restart: unless-stopped
+    volumes:
+      - ./models/embed:/models:ro
+    command: >-
+      -m /models/Qwen3-Embedding-0.6B-Q8_0.gguf
+      --embedding --pooling last -ngl 0 -t 4 -c 8192 -b 8192 -ub 8192
+    # P4.1: 4 threads for book indexing (was 2: 108 tok/s); half the default CPU weight, so Immich,
+    # other apps and the llm win whenever they need the CPU at the same time (BENCHMARKS P4.1).
+    cpu_shares: 512
+    mem_limit: 1500m
+
+  app:
+    image: local/laika-app:0.1
+    build: ./app
+    restart: unless-stopped
+    env_file: .env
+    depends_on: [llm, voice]
+    volumes:
+      - ./data:/data
+      - ./vault:/vault
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:3010:8000"
+    mem_limit: 1500m

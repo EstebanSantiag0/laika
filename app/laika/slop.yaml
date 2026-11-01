@@ -1,0 +1,25 @@
+# English phrasings that make Laika sound like an AI (DECISIONS D16).
+# Checked per sentence while she writes. On a match the reply is rewound to where the
+# pattern starts and continues with a different first token. Keep these OUT of the prompt:
+# naming them there makes the model use them more (arXiv 2601.08070).
+# Each value is a Python regex, matched case-insensitively against one sentence. A group named
+# `cut` marks where to rewind (default: where the match starts).
+patterns:
+  # praising his message or idea instead of engaging with it
+  praise_idea: >-
+    \b(that|this|what|it)('s| is| was)? (such |so |really |truly |actually |incredibly |quite |a |an )*(profound|poetic|beautiful|lovely|deep|fascinating|wonderful|insightful|great|interesting|thoughtful|brilliant|powerful)( \w+)? (way|thought|question|point|idea|perspective|insight|observation|reflection|take|sentiment)\b
+  praise_word: \b(profound(ly)?|poetic|fleeting|tapestry|testament|delve|delving|superpower|resonates?|visceral|palpable|poignant|intricate|multifaceted|unwavering|invaluable|embark(ing)?|realm|reclaim(ing)?)\b
+  # explaining or restating his own message back to him
+  restate_its_like: ^\W*(so,? )?(it'?s|it is|that'?s|that is) (kind of |sort of |almost |a bit )?like (you|you're|you are|trying|when|having|being)\b
+  restate_sounds_like: ^\W*it (sounds|seems|feels) like you('re| are)?\b
+  restate_basically: ^\W*(so,? )?(basically|essentially|in other words),? you('re| are)?\b
+  restate_what_you: ^\W*what you('re| are) (really |basically )?(saying|describing|doing)\b
+  # contrast cliches
+  not_just: \b(it'?s|this is|that'?s|they'?re|you'?re|isn'?t|aren'?t|wasn'?t) not (just|only|merely|simply)\b|\bnot (just|only|merely) [^.;!?]{1,60}[;,—–-]\s*(it'?s|but|they'?re|you'?re|it is)\b
+  rather_than_just: \b(rather than|instead of) (just|merely|simply)\b
+  one_thing_another: \b(it'?s|it is) one thing\b[^.!?]{0,100}\b(it'?s|it is|and) (quite |something |a whole )?another\b
+  whether_or: ^\W*whether (you'?re|it'?s|you|it) [^,.;]{1,60} or\b
+  # "X or Y?" questions that end a reply like an interview (also the short "The grammar or the listening?")
+  either_or_question: '[^.!?\n]*?(?P<cut>\bor\b)[^.!?\n]*\?'
+  # single words in quotation marks ("brain", "feel"): she isn't writing an essay
+  scare_quotes: '(?<![\w])(?<!said )(?<!says )(?<!say )(?<!word )(?<!called )(?<!means )(?<!wrote )(?<!write )(?<!type )["“][A-Za-z''-]+( [A-Za-z''-]+)?[.,!?]?["”](?![\w])'

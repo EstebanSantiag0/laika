@@ -1,0 +1,22 @@
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+PyYAML==6.0.3
+python-multipart==0.0.32
+aiogram==3.31.0
+telethon==1.45.0
+pypinyin==0.55.0
+sqlite-vec==0.1.9
+# P4.1 library (DECISIONS D18; licences checked: BSD/MIT/Apache only, never zhconv (GPL))
+pypdfium2==5.14.0
+python-docx==1.2.0
+charset-normalizer==3.5.2
+jieba==0.42.1
+pymorphy3==2.0.6
+pymorphy3-dicts-ru==2.4.417150.4580142
+simplemma==2.0.0
+opencc-python-reimplemented==0.1.7
+# P4.4 word frequencies (Apache-2.0 code; its frequency data is CC BY-SA 4.0, used as a package, not copied)
+wordfreq==3.1.1
+# P4.6 Anki decks (MIT)
+genanki==0.13.1

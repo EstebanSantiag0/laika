@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Laika</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="who">
+      <img class="avatar" src="/icons/icon.svg" alt="">
+      <div>
+        <div id="name" class="name">Laika</div>
+        <div id="status" class="status">connecting…</div>
+      </div>
+    </div>
+    <select id="lang" aria-label="Practice language">
+      <option value="en">English</option>
+      <option value="ru">Русский</option>
+      <option value="zh">中文</option>
+    </select>
+    <button id="attach" class="icon-btn" type="button" aria-label="Add a book or file to the library">📎</button>
+    <input id="file" type="file" hidden accept=".epub,.pdf,.fb2,.zip,.docx,.txt,.md,.html,.htm">
+    <button id="settings-btn" class="icon-btn" aria-label="Settings">⚙︎</button>
+  </header>
+
+  <main id="log" aria-live="polite">
+    <div id="older" class="older" hidden>Loading…</div>
+    <div id="messages"></div>
+    <div id="typing" class="bubble them typing" hidden aria-label="typing"><i></i><i></i><i></i></div>
+  </main>
+
+  <form id="composer" autocomplete="off">
+    <textarea id="input" rows="1" placeholder="Message…" enterkeyhint="send"></textarea>
+    <button id="send" class="send" type="button" aria-label="Record a voice note">🎤</button>
+  </form>
+
+  <dialog id="settings">
+    <form method="dialog" class="settings">
+      <h2>Settings</h2>
+      <label>Corrections
+        <select name="corrections">
+          <option value="on">After each reply</option>
+          <option value="end">At the end of the conversation</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label>Voice replies
+        <select name="voice_mode">
+          <option value="mirror">When I send a voice note</option>
+          <option value="always">Always</option>
+          <option value="never">Never</option>
+        </select>
+      </label>
+      <label>Voice speed
+        <select name="voice_speed">
+          <option value="1">Normal</option>
+          <option value="0.85">A bit slower</option>
+          <option value="0.7">Slow</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="pinyin"> Show pinyin under Chinese</label>
+      <label>My English level <input name="level_en" placeholder="e.g. B1"></label>
+      <label>My Russian level <input name="level_ru" placeholder="e.g. A1"></label>
+      <label>My Chinese level <input name="level_zh" placeholder="e.g. HSK 1"></label>
+      <menu><button value="cancel">Cancel</button><button value="save" class="primary">Save</button></menu>
+    </form>
+  </dialog>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

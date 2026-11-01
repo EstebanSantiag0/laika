@@ -1,0 +1,15 @@
+# Large or private data: never committed
+/models/
+/data/
+/vault/
+/syncthing/
+llama/src/
+.env
+*.env
+__pycache__/
+*.pyc
+# editor swap/backup files (a vim swap of .env was committed once by mistake)
+*.swp
+*.swo
+.*.sw?
+*~

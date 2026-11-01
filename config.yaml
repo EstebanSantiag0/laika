@@ -1,0 +1,91 @@
+# Laika settings (no secrets here; secrets go in .env).
+# Runtime choices the user makes in the app (language, corrections, voice mode)
+# are stored in the database and override the defaults below.
+
+user:                      # who Laika talks with: the name goes into her prompts, transcripts and the vault
+  name: Dasha            # folder (<name>/Profile.md). Without this block the default is "Dasha".
+  pronouns: they             # he | she | they: how her prompts refer to the user (default: they)
+  about: a Spanish speaker who practices English, Russian and Chinese with her
+
+preset: moe-ram            # P0.5: Gemma 4 26B-A4B, experts in RAM (--cpu-moe); see docs/DECISIONS.md D11
+
+llm:
+  url: http://llm:8080
+  conversation_slot: 0     # slot 0 = live conversation (keeps its prompt cache)
+  background_slot: 1       # slot 1 = tutor, reflection, summaries
+  max_tokens: 400
+  sampling: {temperature: 1.0, top_p: 0.95, top_k: 64}   # Gemma 4 recommended
+  chat_template_kwargs: {enable_thinking: false}
+
+embed:
+  url: http://embed:8080
+
+voice:
+  url: http://voice:8000
+  default_voice: neighbor
+  mode: mirror             # mirror | always | never
+
+batching:                  # W1: she never answers while Dasha is composing
+  web_quiet_s: 4           # wait this long after the last web message
+  typing_idle_s: 6         # a keystroke counts as "typing" for this long
+  draft_hold_s: 25         # ...or this long while the message box still has text (he's thinking)
+  voice_quiet_s: 2
+  telegram_quiet_s: 8      # Telegram bots get no typing signal: patience is a guess
+  telegram_unfinished_s: 25  # after a message that looks unfinished ("and", "...", ",", "hey")
+  burst_factor: 1.5        # several quick messages: wait 1.5x his last gap
+  burst_max_s: 30
+  max_wait_s: 45           # cap while he is NOT composing
+  max_hold_s: 300          # safety cap while he is composing
+
+bubbles:
+  max: 4
+  ms_per_char: 30          # simulated typing speed between bubbles
+  min_delay_s: 0.6
+  max_delay_s: 4
+
+language:
+  default: en              # en | ru | zh
+  native: es
+  pinyin: true
+  corrections: "on"        # on | end | off
+  offer_snooze_h: 3        # W5: after "Not now", no new "Switch to …?" for that language for this long
+
+history:
+  budget_tokens: 5000      # recent conversation kept verbatim in the prompt (system prompt ~2.1k with memory)
+  keep_after_trim: 0.5     # when over budget, keep this fraction of the budget
+
+memory:                    # Phase 3 "Organic Knowledge" (PLAN §6, DECISIONS D14)
+  idle_close_min: 30       # close episodes after this long without messages
+  episode_gap_min: 30      # a silence this long starts a new episode
+  episode_max_msgs: 40     # longer stretches are cut before his next message
+  nightly: "03:00"         # sleep: portrait, memory snapshot for the prompt, backup, vault commit
+  tz: Europe/Madrid
+  history_after_nightly: 2000  # tokens of verbatim chat kept in the prompt after the nightly trim
+  stage_review_days: 90    # W8.3: a "stage" fact (true for now) is checked again after this many days
+
+reminders:                 # W8.1: "remind me…" in the chat becomes a reminder sent at that time
+  default_time: "10:00"    # a day without a time ("mañana") gets this time, and Laika says so
+  check_s: 20              # how often the scheduler looks for due reminders
+  snooze_min: 60           # "Snooze" without minutes (Telegram button, API)
+
+# W8.3: life areas her memory is organized by. Not final yet (Dasha): edit freely, ids are what the
+# database keeps (renaming a name or color is safe; removing an id only hides it).
+areas:
+  - {id: study, name: Estudios, color: "#4f8cff"}
+  - {id: projects, name: Proyectos, color: "#9b59b6"}
+  - {id: finance, name: Finanzas, color: "#2ecc71"}
+  - {id: legal, name: Legal/trámites, color: "#7f8c8d"}
+  - {id: skills, name: Habilidades, color: "#e67e22"}
+  - {id: work, name: Trabajo/prácticas, color: "#34495e"}
+  - {id: languages, name: Idiomas, color: "#e74c3c"}
+  - {id: health, name: Salud, color: "#1abc9c"}
+  - {id: people, name: Personas, color: "#f1c40f"}
+  - {id: home, name: Hogar/día a día, color: "#a0522d"}
+
+library:                   # Phase 4 (PLAN P4.1, DECISIONS D18): books and files in data/library.db
+  chunk_tokens: 600        # chunks of whole sentences...
+  overlap: 80              # ...starting with up to this many tokens of the previous chunk
+  embed_batch: 4           # chunks per embedding call (small, so recall's query never waits long)
+  paste_tokens: 3000       # a pasted message this long goes into the library...
+  paste_keep_chars: 1500   # ...and the chat keeps only its start
+  max_upload_mb: 100       # PWA and her own Telegram account (the bot is limited to 20 MB)
