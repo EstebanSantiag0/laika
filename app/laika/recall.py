@@ -193,7 +193,7 @@ class Recall:
                 ep_lang = None
             else:
                 ep = self.mem.get_episode(ref)
-                if not ep:
+                if not ep or ep.get("trashed_at"):  # SB7b: in the trash
                     continue
                 entity = None
                 b, imp, ts = 0.0, max(ep["arousal"], ep["self_rel"], ep["future_rel"]), ep["end_ts"]

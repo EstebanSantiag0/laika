@@ -14,6 +14,7 @@ Ingestion (P4.1):
    is `ready`: a vault note `Library/<Title>.md` and a 📚 message.
 """
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -21,9 +22,11 @@ import re
 import time
 from collections import Counter
 
+import httpx
 import sqlite_vec
 
 from . import config, extract, words
+from .retry import is_transient
 from .consolidate import note_name
 from .extract import estimate_tokens
 from .memory import DIM
@@ -79,6 +82,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS lib.chunks_fts USING fts5(search_text, tokeni
 """
 VECTORS = f"CREATE VIRTUAL TABLE IF NOT EXISTS lib.chunks_vec USING vec0(embedding float[{DIM}]);"
 _SENTENCE = re.compile(r"[^.!?…。！？\n]*(?:[.!?…。！？]+[\"'»”’)）」』]*|\n|$)")
+FAIL_AFTER = 3  # attempts per chunk or summary before it's given up on (SB0)
+OCR_ALL = "eng+spa+rus+chi_sim"  # SB3: Tesseract languages (tesseract-ocr-* packages in the Dockerfile)
+OCR_DPI = 300
 INBOX = "Library/_inbox"
 INBOX_FAILED = "Library/_inbox/_failed"
 INBOX_SETTLE_S = 10
@@ -142,6 +148,7 @@ def prepare(doc, size, overlap):
     Returns [(section title, [(chunk text, tokens, search text)], Counter{(lang, lemma): n})]."""
     code = doc.lang or "en"
     out = []
+    page = None  # SB3: the PDF page the text is on (carried across sections, which follow page order)
     for title, text in doc.sections:
         units, counts = [], Counter()
 
@@ -152,14 +159,19 @@ def prepare(doc, size, overlap):
 
         count(words.tokens(title or "", code))  # he reads the chapter title too
         for sentence in sentences(text):
+            if m := extract.PAGE_LINE.match(sentence):
+                page = int(m.group(1))
+                continue
             for piece in split_long(sentence, size):
                 toks = words.tokens(piece, code)
-                units.append((piece, estimate_tokens(piece), " ".join(t[1].lower() for t in toks)))
+                units.append((piece, estimate_tokens(piece), " ".join(t[1].lower() for t in toks), page))
                 count(toks)
         chunks = []
         for group in chunk(units, size, overlap):
             body = _join([u[0] for u in group], code)
-            chunks.append((body, sum(u[1] for u in group), " ".join(u[2] for u in group)))
+            pages = [u[3] for u in group if u[3]]
+            chunks.append((body, sum(u[1] for u in group), " ".join(u[2] for u in group),
+                           min(pages) if pages else None, max(pages) if pages else None))
         out.append((title, chunks, counts))
     return out
 
@@ -168,11 +180,16 @@ def _join(parts, code):
     return ("" if code == "zh" else " ").join(parts)
 
 
-def chapter_label(doc, section_ord, section_title):
-    """'Title — Author — ch. 3 "Heading"': put in front of each chunk's embedded and indexed text."""
+def chapter_label(doc, section_ord, section_title, page_from=None, page_to=None):
+    """'Title — Author — ch. 3 "Heading" — p. 41–42': put in front of each chunk's embedded and indexed text
+    (a cheap form of contextual retrieval; the pages since SB3)."""
     head = [doc["title"]] + ([doc["author"]] if doc["author"] else [])
     ch = f"ch. {section_ord + 1}" + (f' "{section_title}"' if section_title else "")
-    return " — ".join(head + [ch])
+    return " — ".join(head + [ch] + ([page_label(page_from, page_to)] if page_from else []))
+
+
+def page_label(page_from, page_to):
+    return f"p. {page_from}" + (f"–{page_to}" if page_to and page_to != page_from else "")
 
 
 class Library:
@@ -192,7 +209,18 @@ class Library:
         if "summary" not in cols:  # P4.3: the book's summary (chapter summaries are in `sections`)
             self.conn.execute("ALTER TABLE lib.documents ADD COLUMN summary TEXT")
             self.conn.execute("ALTER TABLE lib.documents ADD COLUMN summary_ts REAL")
+        # SB0: failures are counted per chunk and per summary, so one bad input can't block the rest
+        for table, new in (("documents", ("summary_attempts INTEGER NOT NULL DEFAULT 0", "summary_error TEXT")),
+                           ("sections", ("summary_attempts INTEGER NOT NULL DEFAULT 0", "summary_error TEXT")),
+                           ("chunks", ("attempts INTEGER NOT NULL DEFAULT 0", "last_error TEXT", "page_from INTEGER",
+                                       "page_to INTEGER"))):
+            have = {r["name"] for r in self.conn.execute(f"PRAGMA lib.table_info({table})")}
+            for col in new:
+                if col.split()[0] not in have:
+                    self.conn.execute(f"ALTER TABLE lib.{table} ADD COLUMN {col}")
         self.lock = asyncio.Lock()  # one extraction at a time (they're CPU-heavy)
+        self.on_document = []  # SB1: async fn(event, doc) for added / indexing / ready / failed (brain.py)
+        self.restore_trashed = None  # SB8: async fn(doc_id) -> bool, set in main.py (brain.restore_doc)
         self.tasks = set()
 
     # documents ---------------------------------------------------------------------------------
@@ -233,10 +261,35 @@ class Library:
         return "\n".join(out)
 
     def progress(self, doc_id):
-        """Share of a document's chunks already embedded (1.0 when ready)."""
-        n, done = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(embedded), 0) FROM lib.chunks WHERE doc_id = ?",
+        """Share of a document's chunks already handled, embedded or given up on (1.0 when ready)."""
+        n, done = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(embedded != 0), 0) FROM lib.chunks WHERE doc_id = ?",
                                     (doc_id,)).fetchone()
         return done / n if n else 0.0
+
+    def counts(self, doc_id):
+        """What is done, failed and still to do (SB0/P8): {chunks, sections, pages}. `pages` comes from the
+        extraction (SB3) and is None for formats without pages."""
+        c = self.conn
+        e = dict(c.execute("SELECT COALESCE(SUM(embedded = 1), 0) AS done, COALESCE(SUM(embedded = -1), 0) AS failed, "
+                           "COALESCE(SUM(embedded = 0), 0) AS todo FROM lib.chunks WHERE doc_id = ? AND kind = 'text'",
+                           (doc_id,)).fetchone())
+        s = dict(c.execute("SELECT COALESCE(SUM(summary IS NOT NULL AND summary != ''), 0) AS summarized, "
+                           "COALESCE(SUM(summary_error IS NOT NULL), 0) AS failed, "
+                           "COALESCE(SUM(summary IS NULL), 0) AS todo FROM lib.sections WHERE doc_id = ?",
+                           (doc_id,)).fetchone())
+        doc = self.document(doc_id)
+        pages = _loads(doc["meta"]).get("pages") if doc else None
+        return {"chunks": e, "sections": s, "pages": pages}
+
+    def state(self, doc):
+        """The document's state for the API: queued, indexing, ocr_pending, ready, ready_partial or failed."""
+        status = doc["status"]
+        if status.startswith("failed"):
+            return "failed"
+        if status != "ready":
+            return status
+        n = self.counts(doc["id"])
+        return "ready_partial" if n["chunks"]["failed"] or n["sections"]["failed"] else "ready"
 
     # search (P4.2) -------------------------------------------------------------------------------------
     def searchable(self):
@@ -274,32 +327,49 @@ class Library:
         return [tuple(r) for r in rows]
 
     # intake --------------------------------------------------------------------------------------
-    async def add(self, data, filename, source, channel, quiet=False):
+    async def add(self, data, filename, source, channel, quiet=False, meta=None):
         """Take a file in. Returns (document or None, reply): None with a reply when it's refused or a
         duplicate. Extraction and indexing continue in the background; their messages go to `channel`."""
         if extract.kind_of(filename) is None:
-            reply = "📚 I can't read that kind of file yet (EPUB, PDF, FB2, DOCX, TXT, MD and HTML work)"
+            reply = "📚 I can't read that kind of file yet (EPUB, PDF, FB2, DOCX, TXT, MD, HTML and pictures work)"
             await self.say(channel, reply)
             return None, reply
         sha = hashlib.sha256(data).hexdigest()
         old = self.conn.execute("SELECT * FROM lib.documents WHERE sha256 = ?", (sha,)).fetchone()
+        if old and old["status"] == "trashed" and self.restore_trashed and await self.restore_trashed(old["id"]):
+            await self.say(channel, f"📚 «{self.document(old['id'])['title']}» was in the trash: it's back")
+            return {**self.document(old["id"]), "restored": True}, None  # SB8: sending it again brings it back
         if old and not old["status"].startswith("failed"):
             reply = f"📚 «{old['title']}» is already in the library"
             await self.say(channel, reply)
             return dict(old), reply
+        replaces = None
         if old:
+            replaces = old["id"]
             self._delete(old["id"])
         (self.originals / f"{sha}.{extract.kind_of(filename)}").write_bytes(data)
         title = extract._clean_title(re.sub(r"\.[A-Za-z0-9]{1,5}$", "", filename)) or "Untitled"
         cur = self.conn.execute(
             "INSERT INTO lib.documents(sha256, title, kind, source, added_ts, meta) VALUES (?, ?, ?, ?, ?, ?)",
             (sha, title, extract.kind_of(filename), source, time.time(),
-             _json({"filename": filename, "kind": extract.kind_of(filename), "channel": channel, "quiet": quiet})))
+             _json({"filename": filename, "kind": extract.kind_of(filename), "channel": channel, "quiet": quiet,
+                    **(meta or {})})))
         doc_id = cur.lastrowid
         if not quiet:  # P4.2: the book he just sent is the one he's reading (/reading changes it; pastes don't)
             self.db.set_setting("current_book", {"id": doc_id, "chapter": None})
+        await self.emit("added", doc_id, replaces=replaces)
         self._spawn(self.ingest(doc_id))
         return self.document(doc_id), None
+
+    async def emit(self, event, doc_id, **extra):
+        doc = self.document(doc_id)
+        if not doc:
+            return
+        for hook in self.on_document:
+            try:
+                await hook(event, {**doc, **extra})
+            except Exception:
+                log.exception("library: %s hook failed for document %s", event, doc_id)
 
     async def add_text(self, text, channel):
         """A long pasted text: saved as a .txt document. Returns its title."""
@@ -342,25 +412,37 @@ class Library:
             channel = meta.get("channel", "web")
             try:
                 data = self.original(doc).read_bytes()
-                parsed = await asyncio.to_thread(extract.extract, data, meta.get("filename", doc["title"]))
+                reader = self._ocr_reader(doc) if meta.get("ocr_done") else None
+                parsed = await asyncio.to_thread(extract.extract, data, meta.get("filename", doc["title"]), reader)
                 prepared = await asyncio.to_thread(prepare, parsed, self.lcfg.get("chunk_tokens", 600),
                                                    self.lcfg.get("overlap", 80))
+            except extract.NeedsOCR as e:  # SB3: pictures of pages, read with OCR while he's away
+                self.conn.execute("UPDATE lib.documents SET status = 'ocr_pending', meta = ? WHERE id = ?",
+                                  (_json({**meta, "ocr_pages": e.pages, "pages_total": e.total}), doc_id))
+                await self.emit("ocr_pending", doc_id)
+                if not meta.get("quiet") or meta.get("item_id"):
+                    await self.say(channel, f"📚 «{doc['title']}» has {len(e.pages)} scanned page(s): I'll read them "
+                                            f"with OCR while you're away")
+                return
             except extract.Unreadable as e:
                 self._fail(doc_id, str(e))
+                await self.emit("failed", doc_id)
                 await self.say(channel, f"📚 I couldn't add «{doc['title']}»: {e}")
                 return
             except Exception as e:
                 log.exception("library: extraction of document %s failed", doc_id)
                 self._fail(doc_id, f"{type(e).__name__}: {e}")
+                await self.emit("failed", doc_id)
                 await self.say(channel, f"📚 I couldn't read «{doc['title']}» (something went wrong on my side)")
                 return
             if not self.document(doc_id):  # deleted meanwhile
                 return
             self._store(doc_id, parsed, prepared, meta)
+        await self.emit("indexing", doc_id)
         n = len(prepared)
         log.info("library: document %s «%s» extracted: %s sections, %s chunks", doc_id, parsed.title, n,
                  sum(len(p[1]) for p in prepared))
-        if not meta.get("quiet"):
+        if not meta.get("quiet") and parsed.kind != "image":
             await self.say(channel, f"📚 Reading «{parsed.title}»… ({_chapters(n)})")
 
     def _store(self, doc_id, parsed, prepared, meta):
@@ -375,9 +457,10 @@ class Library:
                                 (doc_id, ord_, title)).lastrowid
                 label = chapter_label(doc, ord_, title)
                 label_search = words.search_text(label, parsed.lang or "en")
-                for k, (body, toks, search) in enumerate(chunks):
-                    cid = c.execute("INSERT INTO lib.chunks(doc_id, section_id, ord, text, tokens) VALUES (?, ?, ?, ?, ?)",
-                                    (doc_id, sid, n_chunks, body, toks)).lastrowid
+                for k, (body, toks, search, page_from, page_to) in enumerate(chunks):
+                    cid = c.execute("INSERT INTO lib.chunks(doc_id, section_id, ord, text, tokens, page_from, page_to) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    (doc_id, sid, n_chunks, body, toks, page_from, page_to)).lastrowid
                     n_chunks += 1
                     c.execute("INSERT INTO lib.chunks_fts(rowid, search_text) VALUES (?, ?)",
                               (cid, f"{label_search} {search}"))
@@ -396,6 +479,24 @@ class Library:
     def _fail(self, doc_id, reason):
         self.conn.execute("UPDATE lib.documents SET status = ? WHERE id = ?", (f"failed: {reason}"[:300], doc_id))
 
+    async def remove(self, doc_id):
+        """Forget a document for good: its rows, index, vault note and original file (SB1 "forget", SB7b purge)."""
+        doc = self.document(doc_id)
+        if not doc:
+            return False
+        await self.emit("deleted", doc_id)
+        self._delete(doc_id)
+        with contextlib.suppress(OSError):
+            self.original(doc).unlink()
+        if doc.get("note_path"):
+            with contextlib.suppress(OSError):
+                self.vault.path(doc["note_path"]).unlink()
+        cur = self.db.get_setting("current_book") or {}
+        if cur.get("id") == doc_id:
+            self.db.set_setting("current_book", None)
+        log.info("library: document %s removed", doc_id)
+        return True
+
     def _delete(self, doc_id):
         c = self.conn
         ids = [r[0] for r in c.execute("SELECT id FROM lib.chunks WHERE doc_id = ?", (doc_id,))]
@@ -408,46 +509,142 @@ class Library:
             c.execute(f"DELETE FROM lib.{table} WHERE doc_id = ?", (doc_id,))
         c.execute("DELETE FROM lib.documents WHERE id = ?", (doc_id,))
 
+    # OCR of scanned PDF pages (SB3, jobs.py) ----------------------------------------------------------
+    def ocr_pending(self):
+        return self.conn.execute("SELECT 1 FROM lib.documents WHERE status = 'ocr_pending' LIMIT 1").fetchone() is not None
+
+    def _ocr_dir(self, doc):
+        return self.dir / "ocr" / doc["sha256"]
+
+    def _ocr_reader(self, doc):
+        folder = self._ocr_dir(doc)
+
+        def read(i):
+            p = folder / f"{i + 1}.txt"
+            return p.read_text(encoding="utf-8") if p.exists() else ""
+        return read
+
+    async def run_ocr(self):
+        """Page by page (so he can interrupt it between pages; done pages are kept in data/library/ocr/),
+        then the document is extracted again with the OCR text."""
+        for doc in self.documents(("ocr_pending",)):
+            meta = _loads(doc["meta"])
+            folder = self._ocr_dir(doc)
+            folder.mkdir(parents=True, exist_ok=True)
+            langs = OCR_ALL  # a scan says nothing about its language before it's read
+            t0 = time.time()
+            for i in meta.get("ocr_pages", []):
+                out = folder / f"{i + 1}.txt"
+                if not out.exists():
+                    text = await asyncio.to_thread(ocr_page, self.original(doc), i, langs)
+                    out.write_text(text, encoding="utf-8")
+            self.conn.execute("UPDATE lib.documents SET status = 'queued', meta = ? WHERE id = ?",
+                              (_json({**meta, "ocr_done": True}), doc["id"]))
+            log.info("library: OCR of %d pages of document %s done in %.0f s", len(meta.get("ocr_pages", [])),
+                     doc["id"], time.time() - t0)
+            self._spawn(self.ingest(doc["id"]))
+
     # background embedding (jobs.py) ----------------------------------------------------------------
     def pending(self):
         return self.conn.execute("SELECT 1 FROM lib.documents WHERE status = 'indexing' LIMIT 1").fetchone() is not None
 
     async def run(self):
-        """Embed waiting chunks a few at a time; finish each document whose chunks are all embedded.
-        Cancelling between or during batches loses nothing: a batch is written only after its embedding."""
+        """Embed waiting chunks a few at a time; finish each document whose chunks are all handled.
+        Cancelling between or during batches loses nothing: a batch is written only after its embedding.
+        SB0: chunks that failed before go last, and a failing batch is split so only the bad chunk is
+        counted. After FAIL_AFTER attempts a chunk is given up on (`embedded = -1`: keyword search still
+        finds it) and the document finishes without it. If the embed service itself is down, the error is
+        raised as before and nothing is counted: the job runner tries again later."""
         batch = self.lcfg.get("embed_batch", 4)
+        tried = set()  # chunks that failed in this run get one try per run
         while True:
+            skip = ",".join(str(i) for i in tried) or "0"
             rows = self.conn.execute(
-                "SELECT c.id, c.doc_id, c.section_id, c.text, s.ord AS s_ord, s.title AS s_title FROM lib.chunks c "
+                "SELECT c.id, c.doc_id, c.section_id, c.text, c.page_from, c.page_to, s.ord AS s_ord, s.title AS s_title "
+                "FROM lib.chunks c "
                 "JOIN lib.sections s ON s.id = c.section_id JOIN lib.documents d ON d.id = c.doc_id "
-                "WHERE c.embedded = 0 AND d.status = 'indexing' ORDER BY c.doc_id, c.ord LIMIT ?", (batch,)).fetchall()
+                f"WHERE c.embedded = 0 AND d.status = 'indexing' AND c.id NOT IN ({skip}) "
+                "ORDER BY c.attempts, c.doc_id, c.ord LIMIT ?", (batch,)).fetchall()
             if not rows:
                 for doc in self.documents(("indexing",)):
                     await self.finish(doc["id"])
                 return
             docs = {r["doc_id"]: self.document(r["doc_id"]) for r in rows}
-            texts = [chapter_label(docs[r["doc_id"]], r["s_ord"], r["s_title"]) + "\n" + r["text"] for r in rows]
-            vecs = await self.embedder.embed(texts)
-            for r, v in zip(rows, vecs):
-                self.conn.execute("DELETE FROM lib.chunks_vec WHERE rowid = ?", (r["id"],))
-                self.conn.execute("INSERT INTO lib.chunks_vec(rowid, embedding) VALUES (?, ?)",
-                                  (r["id"], sqlite_vec.serialize_float32(v)))
-                self.conn.execute("UPDATE lib.chunks SET embedded = 1 WHERE id = ?", (r["id"],))
+            try:
+                await self._embed_rows(rows, docs)
+            except httpx.HTTPError as e:
+                if is_transient(e):
+                    raise
+                for r in rows:  # find the bad chunk(s)
+                    try:
+                        await self._embed_rows([r], docs)
+                    except httpx.HTTPError as one:
+                        if is_transient(one):
+                            raise
+                        tried.add(r["id"])
+                        self._chunk_failed(r["id"], one)
             for doc_id in docs:
                 left = self.conn.execute("SELECT 1 FROM lib.chunks WHERE doc_id = ? AND embedded = 0 LIMIT 1",
                                          (doc_id,)).fetchone()
                 if not left:
                     await self.finish(doc_id)
 
+    async def _embed_rows(self, rows, docs):
+        texts = [chapter_label(docs[r["doc_id"]], r["s_ord"], r["s_title"], r["page_from"], r["page_to"]) + "\n" + r["text"]
+                 for r in rows]
+        vecs = await self.embedder.embed(texts)
+        for r, v in zip(rows, vecs):
+            self.conn.execute("DELETE FROM lib.chunks_vec WHERE rowid = ?", (r["id"],))
+            self.conn.execute("INSERT INTO lib.chunks_vec(rowid, embedding) VALUES (?, ?)",
+                              (r["id"], sqlite_vec.serialize_float32(v)))
+            self.conn.execute("UPDATE lib.chunks SET embedded = 1 WHERE id = ?", (r["id"],))
+
+    def _chunk_failed(self, chunk_id, exc):
+        err = f"{type(exc).__name__}: {exc}"[:300]
+        self.conn.execute("UPDATE lib.chunks SET attempts = attempts + 1, last_error = ?, "
+                          "embedded = CASE WHEN attempts + 1 >= ? THEN -1 ELSE 0 END WHERE id = ?",
+                          (err, FAIL_AFTER, chunk_id))
+        log.warning("library: chunk %s failed to embed (%s)", chunk_id, err)
+
+    def reconcile(self):
+        """Nightly check (SB0/P8): a ready document must have nothing left to embed. One that does (an
+        older failure, a crash) goes back to `indexing`, so the job finishes it."""
+        reopened = []
+        for doc in self.documents(("ready",)):
+            if self.counts(doc["id"])["chunks"]["todo"]:
+                self.conn.execute("UPDATE lib.documents SET status = 'indexing' WHERE id = ?", (doc["id"],))
+                reopened.append(doc["id"])
+        if reopened:
+            log.warning("library: reconcile reopened documents %s (chunks left to embed)", reopened)
+        return reopened
+
     async def finish(self, doc_id):
         doc = self.document(doc_id)
         if not doc or doc["status"] != "indexing":
             return
+        if self.counts(doc_id)["chunks"]["todo"]:
+            return  # a chunk failed in this run and gets another try on the next one (SB0)
         rel = self.write_note(doc)
         self.conn.execute("UPDATE lib.documents SET status = 'ready', note_path = ? WHERE id = ?", (rel, doc_id))
         n = len(self.sections(doc_id))
         log.info("library: document %s «%s» ready", doc_id, doc["title"])
-        await self.say(_loads(doc["meta"]).get("channel", "web"), f"📚 «{doc['title']}» is in the library ({_chapters(n)})")
+        await self.emit("ready", doc_id)
+        meta = _loads(doc["meta"])
+        if doc["kind"] == "image":  # SB5: a screenshot or photo
+            image = meta.get("image") or {}
+            await self.say(meta.get("channel", "web"), "📚 I saved the picture and read its text" if image.get("has_text")
+                           else "📚 I saved the picture; it has no text I can read, so tell me what it is if you want "
+                                "me to remember it")
+        elif not meta.get("item_id"):  # a link or a reel (SB2/SB4): the item is the news, not the book
+            await self.say(meta.get("channel", "web"), f"📚 «{doc['title']}» is in the library ({_chapters(n)})")
+
+    def _failed_line(self, doc_id):
+        n = self.counts(doc_id)
+        bits = [f"{n['chunks']['failed']} passage(s) couldn't be embedded (keyword search still finds them)"
+                if n["chunks"]["failed"] else None,
+                f"{n['sections']['failed']} chapter summary(ies) failed" if n["sections"]["failed"] else None]
+        bits = [b for b in bits if b]
+        return "- Problems: " + "; ".join(bits) if bits else None
 
     def write_note(self, doc):
         """Vault note `Library/<Title>.md`: what the book is, its summary and its chapters with theirs (P4.3)."""
@@ -459,7 +656,8 @@ class Library:
                  f"- Format: {doc['kind'].upper()}, about {doc['tokens']:,} tokens",
                  f"- Added: {time.strftime('%Y-%m-%d', time.localtime(doc['added_ts']))} from {doc['source']}"
                  + (f" ({meta['filename']})" if meta.get("filename") and doc["source"] != "paste" else ""),
-                 *self.note_extra(doc)]
+                 *self.note_extra(doc),
+                 self._failed_line(doc["id"])]
         if doc.get("summary"):
             lines += ["", "## Summary", doc["summary"]]
         lines += ["", "## Chapters"]
@@ -538,3 +736,24 @@ def _json(d):
 
 def _loads(s):
     return json.loads(s or "{}")
+
+
+def ocr_page(path, index, langs=OCR_ALL):
+    """Text of one PDF page with Tesseract: rendered at OCR_DPI, passed as a PPM (no image library needed)."""
+    import subprocess
+    import tempfile
+
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        page = pdf[index]
+        bm = page.render(scale=OCR_DPI / 72, rev_byteorder=True)
+        w, h, stride, buf = bm.width, bm.height, bm.stride, bytes(bm.buffer)
+        rgb = b"".join(buf[y * stride:y * stride + w * 3] for y in range(h)) if stride != w * 3 else buf
+    finally:
+        pdf.close()
+    with tempfile.NamedTemporaryFile(suffix=".ppm") as f:
+        f.write(f"P6 {w} {h} 255\n".encode() + rgb)
+        f.flush()
+        r = subprocess.run(["tesseract", f.name, "-", "-l", langs, "--psm", "3"], capture_output=True, timeout=300)
+    return r.stdout.decode("utf-8", errors="replace").strip() if r.returncode == 0 else ""

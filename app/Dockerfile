@@ -6,11 +6,17 @@ ENV PIP_NO_CACHE_DIR=1 \
     TZ=Europe/Madrid
 
 # git: the vault keeps its own local history (Phase 3, vault.py)
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# ffmpeg: audio of saved videos (SB4); tesseract: text in scanned PDF pages and screenshots (SB3/SB5)
+RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg \
+      tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa tesseract-ocr-rus tesseract-ocr-chi-sim \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
+# yt-dlp is not pinned on purpose: sites (Instagram above all) change often and only the newest release
+# keeps up. Each build takes the newest; `python -m laika.admin update-ytdlp` updates a running container.
+RUN pip install -U yt-dlp
 
 COPY laika ./laika
 COPY web ./web

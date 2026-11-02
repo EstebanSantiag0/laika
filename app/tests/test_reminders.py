@@ -132,7 +132,8 @@ async def test_delivery():
     r = rem.get(r["id"])
     assert r["status"] == "delivered" and r["message_id"] == first_msg, "a retry reuses the same message"
     msg = db.get_message(first_msg)
-    assert msg["role"] == "system" and msg["text"].startswith("⏰ Buy milk\n(was due today at"), msg["text"]
+    assert msg["role"] == "system" and re.match(r"⏰ Buy milk\n\(was due (today|yesterday) at", msg["text"]), msg["text"]
+    # (an hour ago is "yesterday" between 00:00 and 01:00: found by the public export's tests in another time zone)
     assert any(e["type"] == "reminder" and e["reminder"]["status"] == "delivered" for e in web.events)
     assert reminder_buttons(msg) is not None
     assert not rem.due(), "delivered reminders are not sent again"

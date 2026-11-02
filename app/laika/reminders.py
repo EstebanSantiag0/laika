@@ -137,6 +137,8 @@ class Reminders:
         self.slot = cfg["llm"]["background_slot"]
         self.areas = None  # W8.3: set in main.py (areas.py)
         self.db.conn.executescript(SCHEMA)
+        if "updated" not in {r["name"] for r in self.db.conn.execute("PRAGMA table_info(reminders)")}:
+            self.db.conn.execute("ALTER TABLE reminders ADD COLUMN updated REAL")  # SB7b: stale-edit check
 
     # storage ---------------------------------------------------------------------------------------
     def add(self, text, due_at, source_message_id=None, channel=None, time_defaulted=False, areas=()):
@@ -154,7 +156,7 @@ class Reminders:
     def list(self, status="pending"):
         """Pending means not finished yet: pending, delivered (not marked done) or snoozed."""
         if status == "all":
-            rows = self.db.conn.execute("SELECT * FROM reminders ORDER BY due_at")
+            rows = self.db.conn.execute("SELECT * FROM reminders WHERE status != 'trashed' ORDER BY due_at")
         else:
             rows = self.db.conn.execute("SELECT * FROM reminders WHERE status IN ('pending', 'delivered', 'snoozed') "
                                         "ORDER BY due_at")
@@ -178,8 +180,8 @@ class Reminders:
         if not r:
             return None
         if r["status"] != "done":
-            self.db.conn.execute("UPDATE reminders SET status = 'done', done_at = ? WHERE id = ?",
-                                 (time.time(), reminder_id))
+            self.db.conn.execute("UPDATE reminders SET status = 'done', done_at = ?, updated = ? WHERE id = ?",
+                                 (time.time(), time.time(), reminder_id))
         return await self._changed(reminder_id, "done")
 
     async def snooze(self, reminder_id, minutes=None):
@@ -188,7 +190,7 @@ class Reminders:
             return None
         minutes = max(1, min(int(minutes or self.snooze_min), 60 * 24 * 30))
         self.db.conn.execute("UPDATE reminders SET status = 'snoozed', due_at = ?, snoozes = snoozes + 1, "
-                             "message_id = NULL WHERE id = ?", (time.time() + minutes * 60, reminder_id))
+                             "message_id = NULL, updated = ? WHERE id = ?", (time.time() + minutes * 60, time.time(), reminder_id))
         return await self._changed(reminder_id, f"snoozed {minutes} min")
 
     async def _changed(self, reminder_id, answer):

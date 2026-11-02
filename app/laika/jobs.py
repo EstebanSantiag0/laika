@@ -28,9 +28,9 @@ LIBRARY_QUIET_S = 120
 
 
 class Jobs:
-    def __init__(self, cfg, db, engine, consolidator, nightly, library=None, summaries=None, vocab=None):
+    def __init__(self, cfg, db, engine, consolidator, nightly, library=None, summaries=None, vocab=None, brain=None):
         self.cfg, self.db, self.engine, self.consolidator, self.nightly = cfg, db, engine, consolidator, nightly
-        self.library, self.summaries, self.vocab = library, summaries, vocab
+        self.library, self.summaries, self.vocab, self.brain = library, summaries, vocab, brain
         self.tz = zoneinfo.ZoneInfo(cfg["memory"]["tz"])
         self.failed_at = {}
 
@@ -56,6 +56,12 @@ class Jobs:
             return "consolidate"
         if self.library and self.library.pending() and self.quiet_for() >= LIBRARY_QUIET_S:
             return "library"
+        if self.library and self.quiet_for() >= LIBRARY_QUIET_S and self.library.ocr_pending():
+            return "ocr"  # SB3: scanned PDF pages, page by page
+        if self.brain and self.quiet_for() >= LIBRARY_QUIET_S and self.brain.pending():
+            return "brain"  # SB1: file saved documents (areas, tags, links)
+        if getattr(self, "links", None) and self.quiet_for() >= LIBRARY_QUIET_S and self.links.pending():
+            return "links"  # SB4: a saved reel or video, transcribed
         if self.summaries and self.quiet_for() >= NIGHTLY_QUIET_S and self.summaries.pending():
             return "summaries"
         if self.vocab and self.quiet_for() >= NIGHTLY_QUIET_S and self.vocab.pending():
@@ -74,10 +80,21 @@ class Jobs:
             except Exception:
                 log.exception("memory job runner")
 
+    async def _nightly(self):
+        await self.nightly.run()
+        if self.library:
+            self.library.reconcile()  # SB0/P8: a ready document has nothing left to embed
+        if getattr(self, "graph_edit", None):
+            await self.graph_edit.purge()  # SB7b: 30 days in the trash, then gone for good
+        if self.brain:
+            await self.brain.nightly(getattr(self, "graph_edit", None))  # SB6: archive, Sunday digest, tag merges
+
     async def run(self, job):
-        work = {"nightly": self.nightly.run, "consolidate": self.consolidator.close_all,
+        work = {"nightly": self._nightly, "consolidate": self.consolidator.close_all,
                 "library": self.library and self.library.run, "summaries": self.summaries and self.summaries.run,
-                "vocab": self.vocab and self.vocab.run}[job]()
+                "vocab": self.vocab and self.vocab.run, "brain": self.brain and self.brain.run,
+                "links": getattr(self, "links", None) and self.links.run,
+                "ocr": self.library and self.library.run_ocr}[job]()
         task = asyncio.create_task(work)
         log.info("memory job started: %s", job)
         while not task.done():
@@ -92,7 +109,7 @@ class Jobs:
             self.failed_at[job] = time.time()
             log.error("memory job %s failed", job, exc_info=task.exception())
             return False
-        if job not in ("library", "summaries", "vocab"):
+        if job not in ("library", "summaries", "vocab", "brain", "links", "ocr"):
             self.db.set_setting(f"{job}_requested", False)
         log.info("memory job finished: %s", job)
         return True

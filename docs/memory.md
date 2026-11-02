@@ -90,10 +90,36 @@ pendiente y reintenta. Estados: `pending` → `delivered` → `done`, o `snoozed
   rechaza y no se vuelve a aprender. Si la **reescribes**, tu versión pasa a ser el hecho. Si marcas
   una casilla del Inbox, se confirma. Si reescribes el retrato, tu versión manda.
 
-## 6. Ver la memoria desde fuera
+## 6. El segundo cerebro
 
-`GET /api/graph` ([`API.md`](API.md)) devuelve áreas, entidades, hechos, episodios y recordatorios
-como un grafo (aristas `about`, `related`, `in_episode`, `in_area`, `similar`).
+Además de lo que sabe de ti, guarda lo que tú le das (`brain.py`):
+
+- **Tipos**: `idea`, `for_later` (algo para leer, ver o hacer algún día, sin hora: no es un
+  recordatorio) y `saved` (un link, un archivo, un reel, una captura). Lo que te gusta o no te gusta
+  no es un tipo: es un hecho con `polarity` (`like` / `dislike`).
+- **Clasificar sin que tú archives**: dos ejes fijos y pequeños (10 áreas de vida como máximo, 3 tipos)
+  y hasta 3 etiquetas libres. La memoria de trabajo humana maneja unas 4 cosas a la vez; pasando de
+  ~10 opciones la gente deja de archivar con constancia. Así que ella elige y tú solo corriges.
+- **Enlaces**: al guardar, una llamada al modelo elige hasta 3 nodos existentes (personas, proyectos,
+  hechos, otras cosas guardadas) entre candidatos recuperados por nombre y por significado, con una
+  razón corta. Nunca inventa un nodo. Los enlaces viven en `graph_links`.
+- **Links y videos** (`links.py`): la página se baja y trafilatura saca el artículo; los videos se
+  bajan con yt-dlp y Whisper los transcribe cuando no estás. El texto entra a la biblioteca.
+- **PDF y capturas**: números de página por fragmento (para citar), sin encabezados repetidos; las
+  páginas escaneadas y las capturas se leen con Tesseract.
+- **Volver a traer**: una idea o algo "para después" vuelve a los 3, 10 y 30 días, como mucho uno al
+  día, solo de día y en un momento ligero. Los domingos pregunta si sigues queriendo lo viejo de "para
+  después"; lo que pasó por todo eso sin tocarse se archiva a los 60 días. Las etiquetas que significan
+  lo mismo se fusionan de noche.
+- **Editar todo** (`graph_edit.py`): cada nodo y cada enlace se edita o se borra desde la app. Borrar
+  manda a una papelera de 30 días (con deshacer); un enlace automático que ocultas no vuelve a
+  aparecer. "Olvida X" en el chat sigue borrando al instante.
+
+## 7. Ver la memoria desde fuera
+
+`GET /api/graph` ([`API.md`](API.md)) devuelve áreas, entidades, hechos, episodios, recordatorios,
+cosas guardadas y etiquetas como un grafo (aristas `about`, `related`, `in_episode`, `in_area`,
+`similar`, `tagged`, `link`), y las rutas de `API.md` permiten editarlo.
 [laika-app](https://github.com/EstebanSantiag0/laika-app) lo dibuja.
 
 ## Evaluación

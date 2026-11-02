@@ -188,21 +188,26 @@ def test_docx():
 
 
 def test_pdf():
-    pages = [PDF_LINES, PDF_LINES, ["Chapter two begins on this page with enough words to count as text."] * 3,
-             PDF_LINES]
+    pages = [["Page one opens."] + PDF_LINES, ["Page two opens."] + PDF_LINES,
+             ["Chapter two begins on this page with enough words to count as text."] * 3, ["Page four."] + PDF_LINES]
     doc = extract.extract(make_pdf(pages, outline=[("Opening", 0), ("Second", 2)]), "small.pdf")
     assert (doc.title, doc.author) == ("A Small PDF", "Pdf Author"), doc
     assert [t for t, _ in doc.sections] == ["Opening", "Second"], [t for t, _ in doc.sections]
     first = doc.sections[0][1]
     assert "across several lines because" in first, first
-    assert "ends here.\n" in first and "\n\nThe first line" in first, first
-    doc = extract.extract(make_pdf([PDF_LINES] * 12), "plain.pdf")
+    assert "ends here.\n" in first and "The first line" in first, first
+    doc = extract.extract(make_pdf([[f"Page {i} opens with its own line."] + PDF_LINES for i in range(12)]), "plain.pdf")
     assert [t for t, _ in doc.sections] == ["pages 1–10", "pages 11–12"], [t for t, _ in doc.sections]
     try:
         extract.extract(make_pdf([[]] * 3), "scan.pdf")
-        raise AssertionError("an empty PDF must be refused as a scan")
+        raise AssertionError("a scan must ask for OCR (SB3)")
+    except extract.NeedsOCR as e:
+        assert e.pages == [0, 1, 2] and e.total == 3
+    try:
+        extract.extract(make_pdf([[]] * 3), "scan.pdf", ocr=lambda i: "")
+        raise AssertionError("OCR that finds nothing: refused")
     except extract.Unreadable as e:
-        assert "OCR" in str(e)
+        assert "even with OCR" in str(e)
     print("ok pdf (outline, page sections, de-hyphenation, scanned)")
 
 
@@ -269,7 +274,7 @@ def test_chunks():
     assert all(extract.estimate_tokens(p) <= 601 for p in library.split_long("字" * 1500, 600))
     doc = extract.Doc(title="T", lang="en", sections=[("One", (PARA + "\n") * 40)])
     (title, chunks, counts), = library.prepare(doc, 600, 80)
-    assert len(chunks) > 3 and all(t <= 600 for _, t, _ in chunks), [t for _, t, _ in chunks]
+    assert len(chunks) > 3 and all(t <= 600 for _, t, *_ in chunks), [t for _, t, *_ in chunks]
     assert counts[("en", "river")] == 40 and counts[("en", "frog")] == 40, counts.most_common(5)
     assert "frog" in chunks[0][2]
     ru = extract.Doc(title="Т", lang="ru", sections=[(None, "Собаки лают. Москва большая.")])
@@ -336,14 +341,16 @@ async def _library_flow():
     assert reply == "📚 «The Slow River» is already in the library", reply
     _, reply = await lib.add(b"x", "book.mobi", "web", "web")
     assert reply.startswith("📚 I can't read"), reply
-    # a scanned PDF fails with its reason; sending it again retries
-    doc2, _ = await lib.add(make_pdf([[]] * 2), "scan.pdf", "telegram", "telegram")
+    # a scanned PDF waits for OCR (SB3, in quiet time) and says so; an unreadable file fails and can be sent again
+    doc2, _ = await lib.add(make_pdf([[]] * 4), "scan.pdf", "telegram", "telegram")
     await asyncio.gather(*lib.tasks)
-    assert lib.document(doc2["id"])["status"].startswith("failed: it's a scanned PDF"), lib.document(doc2["id"])
+    assert lib.document(doc2["id"])["status"] == "ocr_pending" and lib.ocr_pending(), lib.document(doc2["id"])
     assert any("OCR" in t for t in engine.said())
-    doc3, reply = await lib.add(make_pdf([[]] * 2), "scan.pdf", "telegram", "telegram")
+    db.conn.execute("UPDATE lib.documents SET status = 'failed: test' WHERE id = ?", (doc2["id"],))
+    doc3, reply = await lib.add(make_pdf([[]] * 4), "scan.pdf", "telegram", "telegram")
     assert reply is None and doc3["id"] != doc2["id"] and lib.document(doc2["id"]) is None
     await asyncio.gather(*lib.tasks)
+    db.conn.execute("UPDATE lib.documents SET status = 'failed: test' WHERE id = ?", (doc3["id"],))
     # a long paste: the message keeps the start, the text goes into the library quietly
     long_text = "Notes from the meeting\n" + "\n".join([PARA] * 100)
     short = await lib.shorten_paste("web", long_text)

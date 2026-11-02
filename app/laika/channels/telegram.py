@@ -70,7 +70,14 @@ class TelegramChannel:
                 await self.library.say("telegram", TOO_BIG.format(limit=BOT_FILE_LIMIT // 2**20))
             else:
                 buf = await self.bot.download(m.document.file_id)
-                await self.library.add(buf.read(), m.document.file_name or "file.txt", "telegram", "telegram")
+                await self.library.add(buf.read(), m.document.file_name or "file.txt", "telegram", "telegram",
+                                       meta={"caption": m.caption} if m.caption else None)
+            if m.caption:
+                await self.engine.receive("telegram", m.caption)
+        elif self.library and m.photo:  # SB5: a screenshot or photo for his second brain
+            buf = await self.bot.download(m.photo[-1].file_id)  # the largest size
+            await self.library.add(buf.read(), f"foto-{m.message_id}.jpg", "telegram", "telegram",
+                                   meta={"caption": m.caption} if m.caption else None)
             if m.caption:
                 await self.engine.receive("telegram", m.caption)
 

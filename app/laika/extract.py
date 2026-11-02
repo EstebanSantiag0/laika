@@ -17,6 +17,7 @@ import io
 import posixpath
 import re
 import zipfile
+from collections import Counter
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import unquote
@@ -25,9 +26,16 @@ from xml.etree import ElementTree as ET
 from . import lang
 
 KINDS = {".epub": "epub", ".pdf": "pdf", ".fb2": "fb2", ".zip": "zip", ".docx": "docx", ".txt": "txt",
-         ".md": "md", ".markdown": "md", ".html": "html", ".htm": "html", ".xhtml": "html"}
+         ".md": "md", ".markdown": "md", ".html": "html", ".htm": "html", ".xhtml": "html",
+         ".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image", ".gif": "image", ".bmp": "image",
+         ".tif": "image", ".tiff": "image"}  # SB5: screenshots and photos, read with OCR
+IMAGE_MIN_CHARS = 20  # less OCR text than this: a picture without text
 PDF_PAGES_PER_SECTION = 10
 PDF_MIN_CHARS_PER_PAGE = 50
+PAGE_MARK = "\ue000"  # SB3: a line "\ue000<n>\ue000" starts PDF page n in a section's text (library.prepare reads it)
+PAGE_LINE = re.compile(r"^\ue000(\d+)\ue000$")
+OCR_FEW = 2            # this many unreadable pages (and ≤ 5%) don't hold a PDF back for OCR: they stay empty
+RUNNING_SHARE = 0.4    # a top/bottom line on more than this share of pages is a running header or footer
 PART_TOKENS = 3000
 SECTION_MAX_TOKENS = 12000  # longer "chapters" (a junk TOC, a huge PDF outline range) are cut into parts
 TITLE_MAX = 60
@@ -53,14 +61,22 @@ def kind_of(filename):
     return KINDS.get(posixpath.splitext(filename.lower())[1])
 
 
-def extract(data, filename):
-    """Doc for a file, or Unreadable. Sections are non-empty; the language is set."""
+class NeedsOCR(Exception):
+    """A PDF with pages that are pictures: the library reads them with OCR while he's away (SB3)."""
+    def __init__(self, pages, total):
+        super().__init__(f"{len(pages)} of {total} pages need OCR")
+        self.pages, self.total = pages, total
+
+
+def extract(data, filename, ocr=None):
+    """Doc for a file, or Unreadable (or NeedsOCR for a PDF with scanned pages and no `ocr`: a function
+    page index → text). Sections are non-empty; the language is set."""
     kind = kind_of(filename)
     stem = _clean_title(posixpath.splitext(posixpath.basename(filename))[0])
     if kind == "epub":
         doc = _epub(data)
     elif kind == "pdf":
-        doc = _pdf(data)
+        doc = _pdf(data, ocr)
     elif kind == "fb2":
         doc = _fb2(data)
     elif kind == "zip":
@@ -71,6 +87,8 @@ def extract(data, filename):
         doc = _html(decode(data))
     elif kind in ("txt", "md"):
         doc = _plain(decode(data), markdown=kind == "md")
+    elif kind == "image":
+        doc = _image(data, posixpath.splitext(filename.lower())[1])
     else:
         raise Unreadable("I can't read that kind of file yet (EPUB, PDF, FB2, DOCX, TXT, MD and HTML work)")
     doc.kind = doc.kind or kind
@@ -79,6 +97,9 @@ def extract(data, filename):
         doc.meta["full_title"] = doc.title
         doc.title = short_title(doc.title)
     doc.sections = split_long_sections(drop_boilerplate([(t, _tidy(s)) for t, s in doc.sections]))
+    if not doc.sections and kind == "image":
+        doc.lang = doc.lang or "es"
+        return doc  # a picture without text is kept as it is (SB5): he can say what it is
     if not doc.sections:
         raise Unreadable("I found no text in it")
     return finish(doc)
@@ -380,7 +401,7 @@ def _add_toc(toc, toc_path, href, title):
 
 
 # PDF -------------------------------------------------------------------------------------------------
-def _pdf(data):
+def _pdf(data, ocr=None):
     import pypdfium2 as pdfium
     try:
         pdf = pdfium.PdfDocument(data)
@@ -395,8 +416,6 @@ def _pdf(data):
             pages.append(textpage.get_text_bounded())
             textpage.close()
             page.close()
-        if sum(len(p.strip()) for p in pages) < PDF_MIN_CHARS_PER_PAGE * max(1, len(pages)):
-            raise Unreadable("it's a scanned PDF (pictures of pages) and I can't do OCR")
         starts = []
         for item in pdf.get_toc():
             dest = item.get_dest()
@@ -405,6 +424,22 @@ def _pdf(data):
                 starts.append((index, re.sub(r"\s+", " ", item.get_title() or "").strip() or None))
     finally:
         pdf.close()
+    # SB3: pages that are pictures (scans) are read with OCR; a few blank pages (a cover, separators) don't wait
+    weak = [i for i, p in enumerate(pages) if len(p.strip()) < PDF_MIN_CHARS_PER_PAGE]
+    n_ocr = 0
+    if weak and ocr is None and (len(weak) > OCR_FEW or len(weak) > 0.05 * len(pages)):
+        raise NeedsOCR(weak, len(pages))
+    if weak and ocr is not None:
+        for i in weak:
+            text = (ocr(i) or "").strip()
+            if len(text) >= PDF_MIN_CHARS_PER_PAGE:
+                pages[i], n_ocr = text, n_ocr + 1
+    if sum(len(p.strip()) for p in pages) < PDF_MIN_CHARS_PER_PAGE * max(1, len(pages)) / 4:
+        raise Unreadable("I found no text in it, even with OCR" if ocr else "it has no text I can read")
+    pages = drop_running(pages)
+    skipped = {i for i, p in enumerate(pages) if _skip_page(p)}
+    info = {"total": len(pages), "text": sum(1 for i, p in enumerate(pages) if p.strip() and i not in weak),
+            "ocr": n_ocr, "empty": sum(1 for p in pages if not p.strip()), "skipped": len(skipped)}
     starts = sorted({i: t for i, t in reversed(starts)}.items())
     if not starts:
         n = PDF_PAGES_PER_SECTION
@@ -414,9 +449,76 @@ def _pdf(data):
     sections = []
     for k, (first, title) in enumerate(starts):
         last = starts[k + 1][0] if k + 1 < len(starts) else len(pages)
-        sections.append((title, "\n\n".join(_unwrap(p) for p in pages[first:last])))
+        body = [f"{PAGE_MARK}{i + 1}{PAGE_MARK}\n\n{_unwrap(pages[i])}" for i in range(first, last)
+                if i not in skipped and pages[i].strip()]
+        if body:
+            sections.append((title, "\n\n".join(body)))
     return Doc(title=_clean_title(meta.get("Title", "")), author=(meta.get("Author") or "").strip(),
-               sections=sections)
+               sections=sections, meta={"pages": info})
+
+
+_NUM_LINE = re.compile(r"^\W*(?:page|p\.|pág\.?|página|стр\.?|第)?\s*\d{1,4}\s*(?:/|of|de|из)?\s*\d{0,4}\W*(?:页)?$", re.I)
+
+
+def drop_running(pages):
+    """Running headers and footers (the book's title, the chapter, "Page 12 of 300") repeat at the top or
+    bottom of most pages and pollute search: a top/bottom line (digits ignored) on more than RUNNING_SHARE
+    of the pages goes, and so does a bare page number there."""
+    def edges(lines):
+        idx = [k for k, ln in enumerate(lines) if ln.strip()]
+        return set(idx[:2] + idx[-2:])
+
+    def key(line):
+        return re.sub(r"\d+", "#", re.sub(r"\s+", " ", line.strip().lower()))
+
+    split = [p.replace("\r\n", "\n").replace("\r", "\n").split("\n") for p in pages]
+    counts, sample = Counter(), {}
+    for lines in split:
+        for k in edges(lines):
+            sample.setdefault(key(lines[k]), lines[k].strip())
+        counts.update({key(lines[k]) for k in edges(lines)})
+
+    def header_like(line):  # short, no sentence end or hyphen break, no lowercase start: not a body line
+        line = re.sub(r"[\x00-\x1f]", "", line).strip()
+        return len(line) <= 70 and not re.search(r"[.!?;,:\-]$", line) and not line[:1].islower()
+
+    running = {k for k, n in counts.items() if k and len(pages) >= 4 and n > RUNNING_SHARE * len(pages)
+               and (header_like(sample[k]) or _NUM_LINE.match(sample[k]))}
+    out = []
+    for lines in split:
+        drop = {k for k in edges(lines) if key(lines[k]) in running or _NUM_LINE.match(lines[k].strip())}
+        out.append("\n".join(ln for k, ln in enumerate(lines) if k not in drop))
+    return out
+
+
+_LEADER = re.compile(r"(?:\.{3,}|…{2,}|\s)\s*[ivxlc\d]{1,4}\s*$", re.I)
+_COPYRIGHT = re.compile(r"\bISBN\b|all rights reserved|todos los derechos reservados|©|copyright", re.I)
+
+
+def _skip_page(text):
+    """A table of contents or index page (most lines end in a page number), or a short copyright page: no
+    use in search or summaries (the rules-first cascade from the laptop session's research)."""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if len(lines) >= 6 and sum(bool(_LEADER.search(ln)) for ln in lines) > 0.6 * len(lines):
+        return True
+    return len(text) < 1500 and len(_COPYRIGHT.findall(text)) >= 2
+
+
+def _image(data, suffix):
+    """Text in a screenshot or photo, with Tesseract (the image is passed as it came)."""
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=suffix or ".png") as f:
+        f.write(data)
+        f.flush()
+        r = subprocess.run(["tesseract", f.name, "-", "-l", "eng+spa+rus+chi_sim", "--psm", "3"], capture_output=True,
+                           timeout=300)
+    if r.returncode != 0:
+        raise Unreadable("I couldn't open that picture")
+    text = r.stdout.decode("utf-8", errors="replace").strip()
+    has_text = len(re.sub(r"\s+", "", text)) >= IMAGE_MIN_CHARS
+    return Doc(title="", sections=[(None, _unwrap(text))] if has_text else [],
+               meta={"image": {"has_text": has_text}})
 
 
 def _unwrap(page):

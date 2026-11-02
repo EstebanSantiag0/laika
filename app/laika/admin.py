@@ -8,6 +8,8 @@ warm           pre-process the current prompt prefix on the conversation slot (a
 consolidate    ask the running app to close all pending episodes now (at its next check, ~1 min).
 nightly        ask the running app to run the nightly sleep now (portrait, memory snapshot, backup).
                Both go through the app's own job runner, so two processes never write memory at once.
+update-ytdlp   update yt-dlp in this container (SB4: Instagram and other sites change often). A rebuild
+               of the image also takes the newest one.
 """
 import asyncio
 import sys
@@ -50,8 +52,16 @@ def request(job):
     return ask
 
 
+async def update_ytdlp():
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp")
+    await proc.wait()
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "yt_dlp", "--version")
+    await proc.wait()
+    print("restart the app to load it: docker compose restart app")
+
+
 COMMANDS = {"fold-history": fold_history, "warm": warm, "consolidate": request("consolidate"),
-            "nightly": request("nightly")}
+            "nightly": request("nightly"), "update-ytdlp": update_ytdlp}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:

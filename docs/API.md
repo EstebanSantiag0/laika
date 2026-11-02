@@ -14,6 +14,18 @@ it is a Unix timestamp.
   `403 {"error": "forbidden"}`; the WebSocket closes with code `4403`.
 - When `ALLOWED_TS_LOGIN` is empty, the check is off (development only).
 
+## Errors
+
+Every error is JSON with an `error` string (since SB7, 2026-11-02; FastAPI's `{"detail": …}` is not
+used). Some errors add a field:
+- `400 {"error"}`: a malformed request (bad JSON, a bad query parameter).
+- `403 {"error": "forbidden"}`: not from the tailnet.
+- `404 {"error"}`: no such thing.
+- `409 {"error", "node_id"?}`: a stale edit (see `base_updated_at`), or an area delete.
+- `413 {"error", "max_mb"}`: an upload over the limit.
+- `415 {"error"}`: a file format she can't read.
+- `422 {"error", "field"}`: a bad value for a field.
+
 ## Health
 
 ### `GET /health` (open)
@@ -83,7 +95,7 @@ Answers a language-switch offer. Returns `{"ok": bool}` (`false`: that offer is 
 ### `GET /api/profile`
 `{"name": "Laika"}`: the name in her persona note (empty until she has one).
 
-## Memory graph (read-only)
+## Memory graph
 
 ### `GET /api/graph?scope=active|all`
 `active` (the default): active facts, all entities and episodes, and reminders that aren't done.
@@ -130,6 +142,180 @@ Answers a language-switch offer. Returns `{"ok": bool}` (`false`: that offer is 
   may have `"areas": []`.
 - Facts also carry `review_after` (an ISO date, for `stage` facts only: from that day Laika asks,
   when it fits, whether it's still true).
+
+### Graph additions (SB7/SB7b, 2026-11-02)
+- **Saved items** are nodes `item:<n>` whose `kind` is the item's kind (`idea`, `for_later`, `saved`),
+  `subkind` its format, plus `status`, `title`, `tags`, `url`.
+- **Tags** are nodes `tag:<name>` (`kind: "tag"`, `count`).
+- **Every node** has `updated_at` (null for areas and tags), `editable` (field names, see "Editing
+  the graph") and `deletable`.
+  - Facts also have `polarity` and `no_mention`.
+  - Entities also have `aliases`.
+  - Areas also have `color`.
+- **Every edge** has `id`, `origin` (`computed` | `auto` | `user`) and `label`.
+  - Computed edges: `id` is `<kind>:<source>:<target>`, e.g. `similar:fact:12:fact:40`.
+  - Stored links: `link:<n>` (he drew it) or `about:<n>` (an item's automatic link, `label` = Laika's
+    reason).
+  - New edge kinds: `tagged` (item → tag), `link` (his own), and `about` from items to entities, facts
+    or items.
+- Hidden edges and trashed nodes never appear. Unknown `kind` values may come later: treat an unknown
+  node kind as `saved`.
+
+## Second brain: items (SB7)
+
+**Item**:
+```json
+{"id": 12, "kind": "idea", "title": "Herb garden on the balcony", "text": "...", "note": "",
+ "areas": ["projects"], "tags": ["garden"], "format": "text", "url": null, "doc": null,
+ "status": "active", "created_at": "2026-11-02T18:00:00-06:00", "updated_at": "...",
+ "resurface_at": "2026-11-05T18:00:00-06:00"}
+```
+- **`kind`**: `idea` | `for_later` | `saved`.
+- **`format`**: `text` | `link` | `video` | `pdf` | `book` | `image`.
+- **`status`**: `active` | `done` | `archived`.
+- **`doc`** (when the item has a library document):
+  `{"id", "title", "state", "progress": {"chunks": {done, failed, todo}, "sections": {summarized, failed, todo}, "pages"}, "pages"}`.
+  - `state`: `queued` | `indexing` | `ocr_pending` | `ready` | `ready_partial` | `failed`.
+  - `ready_partial`: some passages or summaries failed and were skipped.
+  - `GET /api/items/{id}` alone always shows the current state (the WebSocket event is an extra).
+- Every library document (sent from any channel) is also a `saved` item.
+
+### `POST /api/items`
+- **Multipart:** field `file`, plus optional fields `kind`, `areas` (comma-separated), `tags`
+  (comma-separated) and `note`.
+- **Or JSON:** `{"url": "https://…"}` or `{"text": "…"}`, with the same optional keys (`areas` and `tags`
+  as arrays).
+- **Answers:**
+  - `201 {"item"}`: saved. The slow work (extraction, filing, fetching) continues in the background.
+  - `200 {"item": <existing>, "duplicate": true}`: the same file (sha256) or the same URL (lowercase host,
+    no `www.`, no fragment or tracking parameters, no trailing slash).
+  - `201 {"item", "restored": true}`: the same file or URL was in the trash. It comes back: the same item
+    with its notes, tags and links (SB8).
+  - Errors: `413 {"error", "max_mb"}`, `415` for a format she can't read, `422 {"error", "field"}`.
+- **`comment`** (multipart field `comment=true`, or JSON `"comment": true`): Laika also reacts to it.
+  - The answer doesn't wait. In the background, once the file's text is extracted (≤2 min), a user
+    message `📎 <title>` (`meta.attachment.item_id`) enters the web chat and she replies as usual (WebSocket
+    `message` events).
+  - Her note has the OCR text of a picture, or the summary or start of a document.
+  - She can't see pictures: for one without text she asks what it is.
+- **Who files it:**
+  - Without `kind`, a text is filed by Laika (kind, title, areas, tags, links to existing dots). A URL
+    becomes `saved`.
+  - What he sends wins: Laika fills in only what's missing.
+
+### `GET /api/items?kind=&area=&tag=&status=&q=&before=&limit=`
+- Returns `{"items": [Item], "next_before": <id>|null}`.
+- Sorted by id, newest first. `before` is an exclusive id cursor.
+- `limit`: 30 by default, at most 100.
+- `status`: `active` (the default) | `done` | `archived` | `all`.
+- All filters combine with AND. `q` searches the items by meaning and by words.
+
+### `GET /api/items/{id}` → `{"item"}`
+
+### `PATCH /api/items/{id}`
+- Body: any of `title`, `text`, `note`, `kind`, `areas` (≤3), `tags` (≤3), `status`, and
+  `base_updated_at` (see "Editing the graph").
+- Returns `{"item"}`. A title he sets is kept: refiling won't change it.
+
+### `POST /api/items/{id}/resurface` `{"action": "dismiss"|"done"|"later"}`
+- Returns `{"item"}`.
+- `later` moves `resurface_at` to the next step (3 → 10 → 30 days).
+- `dismiss` stops it coming back.
+- `done` also sets `status: done`.
+
+### `GET /api/items/{id}/file`
+The original file (PDF, EPUB, HTML snapshot…), with its Content-Type and Range support. `404` if the
+item has none.
+
+### `GET /api/items/{id}/pages/{n}.png?w=1200`
+- PDF page `n` (1-based) as a PNG, `w` from 200 to 2000 px wide (1200 by default).
+- Cached on the server.
+- Errors: `404` beyond the last page, `415` for a document that isn't a PDF.
+
+### `GET /api/search?q=&limit=`
+`{"results": [{"item_id", "doc_id", "chunk_id", "title", "kind", "format", "snippet", "text",
+"page_from", "page_to", "score"}]}`.
+- **Scope:** items and library passages, by meaning and by words, fused (reciprocal rank fusion).
+- **`snippet`:** about 200 characters around the match.
+- **`page_from`/`page_to`:** the PDF pages of a library passage (SB3); null for items and for other formats.
+- **`limit`:** 20 by default.
+
+### `GET /api/resurface` → `{"items": [Item]}`
+- Ideas and "for later" items due to come back today, at most 3.
+- No model call: the pet may fetch it once after a successful `/health` wake.
+
+### `GET /api/tags` → `[{"tag", "count"}]`
+
+## Likes and dislikes (facts with a polarity)
+
+### `GET /api/likes` → `{"likes": [Fact], "dislikes": [Fact]}`
+- Only active facts with a `polarity`, newest first. Archived and superseded facts never appear.
+- A Fact is the graph's fact node (`id` `"fact:<n>"`).
+
+### `PATCH /api/likes/{fact_id}`
+- `{"polarity": "like"|"dislike"|null}`, or `{"status": "archived"}` (no longer true). Returns the Fact.
+- **`fact_id` in the path is the number `<n>`, not `"fact:<n>"`.** `"fact:12"` in the path gives `422`
+  or `404`.
+
+## Editing the graph (SB7b)
+
+Paths take the graph's string ids, URL-encoded (`fact%3A12`, `tag%3Apasaporte`).
+
+### `PATCH /api/nodes/{node_id}`
+- **Body:** fields from the node's `editable` list, plus an optional `base_updated_at`. If that doesn't
+  match the node's `updated_at` (for example an Obsidian edit came in after the app loaded it):
+  `409 {"error", "node_id"}`. Without it, the last write wins.
+  - It is compared as an instant, to the second, so `…T18:05:10.000Z` matches `…T12:05:10-06:00`.
+  - A value that isn't a date gives `422`.
+- **Returns** `{"node", "edges": [every edge touching it]}`.
+- **`?dry_run=true`** (tags only): `{"merges_into": tag|null, "nodes_affected": n}`.
+- **Fields:**
+
+| Kind | Field: type |
+|---|---|
+| item | `title` string ≤120 · `text` string · `note` string · `kind` idea\|for_later\|saved · `areas` [area id] ≤3 · `tags` [string] ≤3 · `status` active\|done\|archived |
+| fact | `text` string ≤500 · `areas` [area id] ≤3 · `time_scope` permanent\|stage\|dated\|archived · `valid_from`, `valid_to`, `review_after` YYYY-MM-DD\|null · `polarity` like\|dislike\|null · `sensitive` bool · `no_mention` bool |
+| entity | `name` string ≤80, unique · `aliases` [string] · `summary` string · `subkind` person\|place\|thing\|topic\|work |
+| episode | `title` string ≤120 · `text` string (the diary entry) |
+| reminder | `text` string ≤300 · `due_at` ISO datetime (a delivered/snoozed one goes back to pending) · `areas` [area id] ≤2 |
+| area | `name` string ≤40 · `color` `#rrggbb` (areas can't be deleted) |
+| tag | `name` string ≤40, no `:`. Renaming to an existing tag merges them; the merge can be undone from the trash |
+
+### `DELETE /api/nodes/{node_id}?with_facts=true&dry_run=true`
+- Moves the node to the trash for 30 days and returns `{"trashed": [node ids], "edges_removed": [edge ids]}`.
+  `dry_run=true` returns the same and changes nothing. Areas give `409`.
+- **What goes with it:**
+  - **fact:** the fact only. After 30 days it is forgotten for good (she won't learn it again).
+  - **entity:** its facts stay, but lose their link while it's in the trash. With `with_facts=true`,
+    they go with it.
+  - **episode:** its facts and the chat messages stay.
+  - **item:** its library document goes too, unless another item shares it.
+  - **reminder:** won't be delivered. This is different from done: done stays in history.
+  - **tag:** removed from every item.
+  - **His links** to a trashed dot go with it.
+- One restore brings back everything.
+
+### Links
+| Route | Does |
+|---|---|
+| `POST /api/edges` `{"source", "target", "label"?}` | Creates a `link`: `201 {"edge"}`; the same link again: `200 {"edge", "duplicate": true}`. `422 {"error", "field"}` for a missing or trashed node, a self-loop, or a label over 80 characters |
+| `PATCH /api/edges/{edge_id}` `{"label"}` | `link:` and `about:` edges only. Returns `{"edge"}` |
+| `DELETE /api/edges/{edge_id}` | Returns `{"edges_removed": [id]}` |
+
+What `DELETE /api/edges/{edge_id}` does depends on the link:
+- **`link:`** (one he drew): goes to the trash.
+- **`about:`** or a computed link: hidden. The nightly jobs never bring it back.
+- **`in_area` / `tagged`:** edits the node's `areas` / `tags` instead.
+
+### Trash
+- `GET /api/trash` → `{"nodes": [node + "trashed_at", "purge_at", "with"], "hidden_edges": [edge + "hidden_at"]}`
+  - A tag rename shows as `tag:<old>` with `renamed_to`.
+  - Hidden edges have no purge date.
+- `POST /api/trash/{node_id}/restore` → `{"restored": [node ids], "edges": [edges]}`.
+- `POST /api/trash/edges/{edge_id}/restore` → `{"edge"}`: restores a link from the trash, or un-hides a
+  hidden one.
+- After 30 days, the nightly job deletes trashed nodes for good. Telling Laika "forget X" in the chat
+  still deletes at once.
 
 ## Reminders
 
@@ -190,6 +376,7 @@ Every server event goes to every open socket (all tabs and devices), as JSON obj
 | `settings` | `settings` (Settings), `origin` | settings changed |
 | `error` | `text`, `origin` | the turn failed |
 | `reminder` | `reminder` (Reminder), `origin: "app"` | a reminder was created, delivered, snoozed or done |
+| `item` | `item` (Item), `origin: "app"` | a saved item was created, filed or changed (SB7; an extra: GET is the source of truth) |
 
 `origin` is the channel the turn belongs to (`web`, `telegram`, or `app` for reminder events).
 Clients normally show everything, whatever the origin.

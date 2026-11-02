@@ -20,3 +20,5 @@ opencc-python-reimplemented==0.1.7
 wordfreq==3.1.1
 # P4.6 Anki decks (MIT)
 genanki==0.13.1
+# SB2 links: main text of web pages (Apache-2.0 since v1.8; its deps lxml, courlan, htmldate, justext are BSD/Apache)
+trafilatura==2.0.0

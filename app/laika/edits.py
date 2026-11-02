@@ -50,6 +50,8 @@ class Edits:
 
     async def apply(self, rel):
         """Compare one note with what Laika wrote into it; returns how many edits were applied."""
+        if rel.startswith("Brain/") and getattr(self, "brain", None):  # SB7b: a saved item's note
+            return await self.brain.apply_vault_edit(rel)
         section = self.vault.section(rel)
         rendered = self.vault.rendered_lines(rel)
         if section is None:

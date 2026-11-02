@@ -35,4 +35,7 @@ docker compose exec app python -m laika.admin nightly  # force the nightly memor
 docker run --rm -v "$PWD/app:/app:ro" -e PYTHONDONTWRITEBYTECODE=1 -w /app local/laika-app:0.1 python -m tests.test_engine
 ```
 Tests: `test_engine test_render test_memory test_consolidate test_edits test_recall test_reminders
-test_api test_areas test_telegram_user` (fake model and embedder; no GPU needed).
+test_api test_areas test_telegram_user test_library test_summaries test_books test_sb0 test_brain
+test_brain_api test_links test_sb3 test_sb5 test_sb6` (fake model and embedder; no GPU needed; the
+image's ffmpeg and tesseract are used by test_links, test_sb3 and test_sb5).
+yt-dlp is unpinned on purpose (sites change); `python -m laika.admin update-ytdlp` updates it in place.

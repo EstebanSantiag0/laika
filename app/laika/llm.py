@@ -13,6 +13,7 @@ import re
 import httpx
 
 from . import render, slop
+from .retry import retrying
 
 log = logging.getLogger(__name__)
 
@@ -179,8 +180,15 @@ class LLM:
         """One-shot completion. With json_schema the reply is constrained to that schema and parsed."""
         if json_schema is not None:
             overrides["response_format"] = {"type": "json_schema", "json_schema": {"schema": json_schema}}
-        r = await self.client.post(f"{self.url}/v1/chat/completions", json=self._body(messages, slot, **overrides))
-        r.raise_for_status()
+        body = self._body(messages, slot, **overrides)
+
+        async def call():
+            r = await self.client.post(f"{self.url}/v1/chat/completions", json=body)
+            r.raise_for_status()
+            return r
+
+        # a read timeout here is already 10 min: retry only a server that is down, loading or busy
+        r = await retrying(call, timeouts=False, what="llm chat")
         text = r.json()["choices"][0]["message"]["content"]
         return json.loads(text) if json_schema is not None else text
 

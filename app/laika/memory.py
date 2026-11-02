@@ -164,6 +164,10 @@ def digest(text):
     return hashlib.sha256(" ".join(_WORDS.findall(text.lower())).encode()).hexdigest()
 
 
+def _polarity(value):
+    return value if value in ("like", "dislike") else None
+
+
 def _row(r):
     d = dict(r)
     for key in ("aliases", "entity_ids", "evidence", "recent_ts", "cue_terms", "items", "used"):
@@ -185,6 +189,13 @@ class Memory:
             self.conn.execute("ALTER TABLE facts ADD COLUMN time_scope TEXT NOT NULL DEFAULT 'permanent'")
         if "review_after" not in cols:  # W8.3: a "stage" fact is checked again after this day
             self.conn.execute("ALTER TABLE facts ADD COLUMN review_after TEXT")
+        if "polarity" not in cols:  # SB1 (D22): likes and dislikes are facts with a polarity
+            self.conn.execute("ALTER TABLE facts ADD COLUMN polarity TEXT")
+        # SB7b (D23): edits from the app need updated_at (stale-edit check) and a 30-day trash
+        for table, col in (("facts", "updated REAL"), ("entities", "trashed_at REAL"), ("episodes", "trashed_at REAL"),
+                           ("episodes", "updated REAL")):
+            if col.split()[0] not in {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
 
     # index --------------------------------------------------------------------------------
     def _index(self, kind, ref_id, text, embedding):
@@ -258,8 +269,9 @@ class Memory:
         row = self.conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
         return _row(row) if row else None
 
-    def entities(self):
-        return [_row(r) for r in self.conn.execute("SELECT * FROM entities ORDER BY name")]
+    def entities(self, include_trashed=False):
+        q = "SELECT * FROM entities" + ("" if include_trashed else " WHERE trashed_at IS NULL") + " ORDER BY name"
+        return [_row(r) for r in self.conn.execute(q)]
 
     def link(self, entity_ids):
         """Strengthen co-mention edges between entities that appear together."""
@@ -270,9 +282,28 @@ class Memory:
                                   "ON CONFLICT(a, b) DO UPDATE SET weight = weight + 1", (a, b))
 
     def neighbours(self, entity_id):
+        """Co-mentioned entities with their weights. SB7b: a `related` link he hid doesn't count, and a link he
+        drew between two entities counts as the strongest one."""
         rows = self.conn.execute("SELECT b AS other, weight FROM edges WHERE a = ? UNION ALL "
                                  "SELECT a AS other, weight FROM edges WHERE b = ?", (entity_id, entity_id))
-        return {r["other"]: r["weight"] for r in rows}
+        out = {r["other"]: r["weight"] for r in rows}
+        me = f"entity:{entity_id}"
+        try:
+            links = self.conn.execute("SELECT source, target, kind, action FROM graph_links WHERE (source = ? OR target = ?) "
+                                      "AND trashed_at IS NULL AND kind IN ('related', 'link')", (me, me)).fetchall()
+        except sqlite3.OperationalError:  # no second brain tables (tests of older parts)
+            return out
+        top = max(out.values(), default=1)
+        for r in links:
+            other = r["target"] if r["source"] == me else r["source"]
+            if not other.startswith("entity:"):
+                continue
+            oid = int(other.split(":", 1)[1])
+            if r["action"] == "hide" and r["kind"] == "related":
+                out.pop(oid, None)
+            elif r["action"] == "add" and r["kind"] == "link":
+                out[oid] = max(out.get(oid, 0), top)
+        return out
 
     # episodes -------------------------------------------------------------------------------
     def add_episode(self, ep, embedding=None, facts_text=""):
@@ -299,7 +330,8 @@ class Memory:
 
     def episodes_between(self, start_ts, end_ts):
         return [_row(r) for r in self.conn.execute(
-            "SELECT * FROM episodes WHERE start_ts >= ? AND start_ts < ? ORDER BY start_ts", (start_ts, end_ts))]
+            "SELECT * FROM episodes WHERE start_ts >= ? AND start_ts < ? AND trashed_at IS NULL ORDER BY start_ts",
+            (start_ts, end_ts))]
 
     def last_episode(self):
         row = self.conn.execute("SELECT * FROM episodes ORDER BY end_ts DESC LIMIT 1").fetchone()
@@ -315,12 +347,12 @@ class Memory:
         cur = self.conn.execute(
             "INSERT INTO facts(entity_id, text, category, importance, arousal, confidence, sensitive, valid_from, "
             "valid_to, recorded_at, status, origin, evidence, episode_id, n_uses, first_ts, recent_ts, time_scope, "
-            "review_after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+            "review_after, polarity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
             (fact.get("entity_id"), fact["text"], fact.get("category", "identity"), fact.get("importance", 0.5),
              fact.get("arousal", 0), fact.get("confidence", 0.8), int(bool(fact.get("sensitive"))),
              fact.get("valid_from"), fact.get("valid_to"), now, status, fact.get("origin", "extracted"),
              json.dumps(fact.get("evidence", [])), fact.get("episode_id"), now, json.dumps([now]),
-             fact.get("time_scope") or "permanent", fact.get("review_after")))
+             fact.get("time_scope") or "permanent", fact.get("review_after"), _polarity(fact.get("polarity"))))
         self._index("fact", cur.lastrowid, fact["text"], embedding)
         return cur.lastrowid
 
@@ -337,6 +369,7 @@ class Memory:
     def update_fact(self, fact_id, embedding=None, **fields):
         if "evidence" in fields:
             fields["evidence"] = json.dumps(fields["evidence"])
+        fields.setdefault("updated", time.time())
         if fields:
             cols = ", ".join(f"{k} = ?" for k in fields)
             self.conn.execute(f"UPDATE facts SET {cols} WHERE id = ?", (*fields.values(), fact_id))

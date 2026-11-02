@@ -37,6 +37,8 @@ if it adds detail to one (its id, and the full new sentence), "replace" if that 
   - "importance" 0-1 (1 = core to who he is or what he's going through), "confidence" 0-1 (how sure \
 you are he meant it), "sensitive": health, family conflict, money, sex or crises.
   - "areas": the parts of his life it belongs to, at most 2 of: {areas}. An empty list if none fits.
+  - "polarity": for a taste or opinion, "like" if he likes, loves or enjoys it, "dislike" if he \
+dislikes or hates it; "none" for everything else.
   - "time_scope": "permanent" (lasting: who he is, his tastes, his people), "stage" (true for this \
 period of his life and likely to change: looking for internships, living in Seville for now, preparing \
 an exam), or "dated" (an event or deadline on a day: give "valid_from", and "valid_to" when it ends \
@@ -79,9 +81,10 @@ SCHEMA = {
             "importance": {"type": "number"}, "confidence": {"type": "number"}, "sensitive": {"type": "boolean"},
             "areas": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
             "time_scope": {"enum": ["permanent", "stage", "dated"]},
+            "polarity": {"enum": ["like", "dislike", "none"]},
             "valid_from": {"type": "string"}, "valid_to": {"type": "string"}},
             "required": ["text", "about", "category", "op", "id", "importance", "confidence", "sensitive", "areas",
-                         "time_scope"]}},
+                         "time_scope", "polarity"]}},
         "intentions": {"type": "array", "maxItems": 4, "items": {"type": "object", "properties": {
             "text": {"type": "string"}, "due_from": {"type": "string"}, "due_to": {"type": "string"},
             "cue_terms": {"type": "array", "items": {"type": "string"}}},
@@ -263,7 +266,7 @@ class Consolidator:
             row = {"entity_id": ent["id"], "text": f["text"].strip(), "category": f.get("category", "identity"),
                    "importance": clamp(f.get("importance")), "arousal": arousal,
                    "confidence": clamp(f.get("confidence")), "sensitive": bool(f.get("sensitive")),
-                   "episode_id": episode_id, "evidence": evidence,
+                   "episode_id": episode_id, "evidence": evidence, "polarity": f.get("polarity"),
                    **time_fields(f, datetime.datetime.now(self.tz).date(),
                                  self.cfg["memory"].get("stage_review_days", 90))}
             fid, op = self._fact(row, vec, f.get("op"), known.get(f.get("id")))
@@ -306,7 +309,8 @@ class Consolidator:
                             importance=max(old["importance"], row["importance"]),
                             confidence=max(old["confidence"], row["confidence"]),
                             time_scope=row["time_scope"], valid_from=row["valid_from"] or old["valid_from"],
-                            valid_to=row["valid_to"] or old["valid_to"], review_after=row["review_after"])
+                            valid_to=row["valid_to"] or old["valid_to"], review_after=row["review_after"],
+                            polarity=row.get("polarity") if row.get("polarity") in ("like", "dislike") else old.get("polarity"))
             mem.use("fact", old["id"])
             return old["id"], op
         if op == "replace":

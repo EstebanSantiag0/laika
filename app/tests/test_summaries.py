@@ -36,7 +36,7 @@ class FakeLLM:
             raise asyncio.CancelledError()  # they came back
         system, user = messages[0]["content"], messages[1]["content"]
         kind = "BOOK" if "whole of" in system else "MERGED" if "Merge" in system else "PART" if "part " in system else "CH"
-        return f"**{kind}** " + " ".join(user.split()[:12])
+        return f"**{kind}** " + " ".join(user.split()[:12]).rstrip(".") + "."  # a finished sentence (SB0 check)
 
 
 async def _flow():

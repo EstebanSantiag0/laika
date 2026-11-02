@@ -12,7 +12,9 @@ from fastapi.staticfiles import StaticFiles
 from . import config
 from .anki import AnkiExport
 from .api import Api
+from .api_brain import BrainApi, install_errors
 from .areas import Areas
+from .brain import Brain
 from .books import Books
 from .channels.web import WebChannel
 from .compaction import Compactor
@@ -22,8 +24,10 @@ from .db import DB
 from .edits import Edits
 from .edits import run as watch_vault
 from .embed import Embedder
+from .graph_edit import GraphEdit
 from .jobs import Jobs
 from .library import Library
+from .links import Links
 from .llm import LLM
 from .memory import Memory
 from .memory_commands import MemoryCommands
@@ -69,8 +73,12 @@ engine.long_text = library.shorten_paste
 vocab = Vocab(cfg, db, library, persona, llm)  # P4.4: what he knows, book difficulty, glosses
 tutor.on_checked = vocab.from_his_messages
 library.note_extra = vocab.note_lines
+brain = Brain(cfg, db, llm, memory, embedder, vault, engine, areas, library)  # SB1: his second brain
+library.on_document.append(brain.on_document)
+links = Links(cfg, db, library, brain, engine)  # SB2/SB4: the page or the video behind a saved link
+brain.fetch_url = links.fetch
 jobs = Jobs(cfg, db, engine, consolidator, Nightly(cfg, db, llm, memory, vault, consolidator, persona, areas), library,
-            Summaries(cfg, db, llm, library, embedder), vocab)  # P4.3/P4.4: summaries and glosses while he's away
+            Summaries(cfg, db, llm, library, embedder), vocab, brain)  # P4.3/P4.4: summaries and glosses while he's away
 recall = Recall(cfg, db, memory, embedder, persona)
 books = Books(cfg, db, library, embedder, persona)  # P4.2: passages from his books, /books, /reading
 engine.before_turn += [MemoryCommands(cfg, db, memory, embedder, engine).before_turn, recall.for_turn, books.before_turn]
@@ -84,7 +92,14 @@ engine.after_turn.append(recall.after_turn)
 reminders = Reminders(cfg, db, llm, engine)  # W8.1: "remind me" becomes a reminder sent at that time
 reminders.areas = areas
 engine.before_turn.append(reminders.before_turn)
+engine.before_turn.append(brain.before_turn)  # SB1: "guarda esta idea", links, saved things that fit
 edits = Edits(db, memory, embedder, vault)  # P3.5: his edits in Obsidian win
+edits.brain = brain  # SB7b: his edits to Brain/ notes too
+graph_edit = GraphEdit(cfg, db, memory, embedder, vault, brain, reminders, areas, library, consolidator)  # SB7b
+jobs.graph_edit = graph_edit  # the nightly job empties the 30-day trash
+brain.edit = graph_edit  # a file or link sent again while in the trash comes back
+library.restore_trashed = brain.restore_doc
+jobs.links = links  # SB4: reels and videos are transcribed while he's away
 web = WebChannel(engine, db, cfg, voice, library, vocab)
 engine.channels.append(web)
 
@@ -124,6 +139,7 @@ async def lifespan(_app):
     await llm.raw_ready()  # logs whether exact replay is on (DECISIONS D15); retried at the first turn if not
     backup_if_missing()
     await library.resume()  # extraction a restart interrupted
+    await brain.backfill_library()  # SB1: documents from before the second brain become saved items
     runner = asyncio.create_task(jobs.loop())  # episodes after quiet time, nightly sleep (P3.3)
     watcher = asyncio.create_task(watch_vault(edits))
     scheduler = asyncio.create_task(reminders.loop())  # W8.1: also sends what was due while the server was down
@@ -155,7 +171,12 @@ async def health():
 
 
 app.include_router(web.router)
-app.include_router(Api(cfg, db, memory, reminders, areas).router)  # W8.2: graph + reminders for laika-app (docs/API.md)
+graph_api = Api(cfg, db, memory, reminders, areas, brain, graph_edit)
+app.include_router(graph_api.router)  # W8.2: graph + reminders for laika-app (docs/API.md)
+app.include_router(BrainApi(cfg, db, memory, embedder, brain, library, graph_edit, graph_api).router)  # SB7/SB7b
+
+
+install_errors(app)  # {"error": ...} everywhere (docs/API.md)
 
 
 @app.get("/")

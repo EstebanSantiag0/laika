@@ -120,6 +120,54 @@ class Vault:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(data, indent=0), encoding="utf-8")
 
+    def drop_fact(self, fact_id):
+        """SB7b: take a fact's line out of every note Laika wrote it into, and out of rendered.json at the same
+        time, so the watcher doesn't read it as his deletion (that would tombstone it). Returns the notes."""
+        touched = []
+        for rel in list(self.rendered()):
+            lines = self.rendered_lines(rel)
+            if fact_id not in lines:
+                continue
+            text = self.read(rel)
+            if text is not None:
+                kept = [ln for ln in text.split("\n") if not ((m := BLOCK_ID.search(ln)) and int(m.group(1)) == fact_id)]
+                path = self.path(rel)
+                tmp = path.with_name(path.name + ".tmp~")
+                tmp.write_text("\n".join(kept), encoding="utf-8")
+                tmp.replace(path)
+            lines.pop(fact_id, None)
+            self.set_rendered(rel, lines)
+            touched.append(rel)
+        return touched
+
+    def trash_note(self, rel):
+        """SB7b: move a note to `.trash/` (ignored by the watcher and by git). Returns its trash path or None."""
+        src = self.path(rel)
+        if not rel or not src.exists():
+            return None
+        dest_rel = f".trash/{rel}"
+        dest = self.path(dest_rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.replace(dest)
+        data = self.rendered()
+        if rel in data:
+            data.pop(rel)
+            p = self.path(RENDERED)
+            p.write_text(json.dumps(data, indent=0), encoding="utf-8")
+        return dest_rel
+
+    def untrash_note(self, rel):
+        src = self.path(f".trash/{rel}")
+        if not rel or not src.exists():
+            return False
+        dest = self.path(rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.replace(dest)
+        section = self.section(rel)
+        if section is not None:
+            self.set_rendered(rel, fact_ids(section))
+        return True
+
     def prompt_text(self, rel):
         """A note as prompt text: no frontmatter, HTML comments, block ids or the title line."""
         text = self.read(rel)

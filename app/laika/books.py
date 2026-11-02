@@ -172,6 +172,9 @@ def citation(doc, chunk, passage, reading=False, cfg=None):
         where = "your notes on the whole book"
     else:
         where = f"ch. {chunk['s_ord'] + 1}" + (f' "{chunk["s_title"]}"' if chunk["s_title"] else "")
+        if chunk.get("page_from"):  # SB3: so she can say "page 41 of …"
+            where += ", " + f"p. {chunk['page_from']}" + (f"–{chunk['page_to']}" if chunk.get("page_to") and
+                                                          chunk["page_to"] != chunk["page_from"] else "")
         where = f"your notes on {where}" if chunk["kind"] == "summary" else where
     passage = re.sub(r"\s+", " ", passage).replace("[", "(").replace("]", ")")
     lead = personal("from his library" + (" (the book he is reading)" if reading else ""), cfg)

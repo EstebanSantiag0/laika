@@ -60,6 +60,17 @@ class Areas:
                 "SET name = excluded.name, color = excluded.color, position = excluded.position, active = 1",
                 (aid, a.get("name") or aid, a.get("color") or "#888888", pos))
         self.conn.execute(f"UPDATE areas SET active = 0 WHERE id NOT IN ({','.join('?' * len(ids))})", ids)
+        self.apply_overrides()
+
+    def apply_overrides(self):
+        """SB7b: names and colors he changed in the app win over config.yaml (kept in settings)."""
+        row = self.conn.execute("SELECT value FROM settings WHERE key = 'area_overrides'").fetchone() \
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'settings'").fetchone() else None
+        for aid, o in (json.loads(row[0]) if row else {}).items():
+            if o.get("name"):
+                self.conn.execute("UPDATE areas SET name = ? WHERE id = ?", (o["name"], aid))
+            if o.get("color"):
+                self.conn.execute("UPDATE areas SET color = ? WHERE id = ?", (o["color"], aid))
 
     def list(self):
         return [{"id": r["id"], "name": r["name"], "color": r["color"]} for r in self.conn.execute(

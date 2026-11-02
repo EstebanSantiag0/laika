@@ -20,7 +20,8 @@ Solo se publican puertos en `127.0.0.1`. El acceso desde tus dispositivos pasa p
 | `data/laika.db` | SQLite (WAL): mensajes, turnos, ajustes, memoria (episodios, hechos, entidades, pendientes, rondas), índices FTS5 y sqlite-vec, recordatorios, áreas, vocabulario |
 | `data/library.db` | La biblioteca (documentos, secciones, fragmentos, índices). Se puede reconstruir |
 | `data/audio/`, `data/uploads/` | Audio de las notas de voz y de sus respuestas |
-| `vault/` | Bóveda de Obsidian que la app escribe (perfil, diario, personas, temas, biblioteca), con su propio historial git local y una copia nocturna de la base en `vault/.laika/backup/` |
+| `data/library/` | Originales de la biblioteca, copias HTML de los links (`snapshots/`), texto OCR por página (`ocr/`) y páginas de PDF en PNG (`pages/`) |
+| `vault/` | Bóveda de Obsidian que la app escribe (perfil, diario, personas, temas, biblioteca, `Brain/`), con su propio historial git local y una copia nocturna de la base en `vault/.laika/backup/` |
 | `models/` | Los modelos (~26 GB) |
 
 Nada de esto está en git, y nada sale del servidor salvo los mensajes de Telegram si lo usas.
@@ -77,10 +78,11 @@ Nada de esto está en git, y nada sale del servidor salvo los mensajes de Telegr
 | `tutor.py`, `lang.py` | Correcciones, pinyin, detección de idioma |
 | `memory.py`, `consolidate.py`, `nightly.py`, `recall.py`, `memory_commands.py` | La memoria ([`memory.md`](memory.md)) |
 | `areas.py`, `reminders.py` | Áreas de vida y recordatorios |
+| `brain.py`, `links.py`, `graph_edit.py`, `api_brain.py`, `retry.py` | El segundo cerebro: guardar, enlazar, links y reels, volver a traer, editar el grafo, su API; reintentos a los servicios de modelos |
 | `vault.py`, `edits.py` | Notas de Obsidian y tus ediciones |
 | `library.py`, `extract.py`, `books.py`, `summaries.py`, `vocab.py`, `anki.py`, `words.py` | Biblioteca y vocabulario |
 | `jobs.py`, `compaction.py`, `admin.py` | Tareas de fondo, compactar historial, comandos de admin |
-| `api.py`, `channels/` | API de lectura para laika-app, WebSocket/PWA, Telegram |
+| `api.py`, `channels/` | Grafo y recordatorios para laika-app, WebSocket/PWA, Telegram |
 
 Los comentarios del código citan a veces pasos y decisiones como `P3.3`, `D15` o `BENCHMARKS P4.1`:
 vienen de la bitácora privada de desarrollo (con datos personales), que no se publica. Este

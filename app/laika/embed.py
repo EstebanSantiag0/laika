@@ -8,6 +8,8 @@ from collections import OrderedDict
 
 import httpx
 
+from .retry import retrying
+
 # Topic-focused on purpose: an instruction naming the user and Laika made every memory look alike (they all
 # mention him). Calibration 2026-10-18 (BENCHMARKS P3.4): top match 0.46-0.57 for related messages vs
 # 0.24-0.35 for unrelated ones with this wording; 0.55-0.65 vs 0.37-0.64 with the old one.
@@ -24,8 +26,12 @@ class Embedder:
         if not texts:
             return []
         inputs = [QUERY + t if query else t for t in texts]
-        r = await self.client.post(f"{self.url}/v1/embeddings", json={"input": inputs})
-        r.raise_for_status()
+        async def call():
+            r = await self.client.post(f"{self.url}/v1/embeddings", json={"input": inputs})
+            r.raise_for_status()
+            return r
+
+        r = await retrying(call, what="embed")
         return [d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"])]
 
     async def one(self, text, query=False):

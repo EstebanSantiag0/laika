@@ -44,8 +44,15 @@ la personalidad se configuran.
 - **Recordatorios de verdad.** "Recuérdame mañana a las 5 pagar la renta" crea un recordatorio que
   llega a esa hora por Telegram y a la app, aunque el servidor haya estado apagado (llega tarde,
   nunca se pierde).
-- **Biblioteca.** Le mandas libros (EPUB, PDF, FB2, DOCX…): los cita, resume capítulos, mide tu
-  vocabulario y exporta mazos de Anki.
+- **Biblioteca.** Le mandas libros (EPUB, PDF, FB2, DOCX…): los cita con capítulo y página, resume
+  capítulos, mide tu vocabulario y exporta mazos de Anki. Las páginas escaneadas se leen con OCR
+  (Tesseract) mientras no estás.
+- **Segundo cerebro.** "Apunta esta idea…", "para después…", un link, un reel o una captura: ella lo
+  guarda, lo clasifica (área, tipo, etiquetas) y lo enlaza con lo que ya sabe de ti (tus proyectos,
+  metas, personas), con una razón corta. Los links guardan el texto de la página (los links mueren);
+  los reels se transcriben; las capturas se leen con OCR. Te recuerda con calma una idea o algo
+  "para después" a los 3, 10 y 30 días, como mucho una vez al día. Lo que te gusta y no te gusta
+  queda como hechos sobre ti. Todo se puede editar y borrar desde laika-app (con papelera de 30 días).
 - **Varios frentes, una sola conversación.** PWA por Tailscale, bot de Telegram y la app Flutter.
 
 ## Cómo está hecha
@@ -201,6 +208,10 @@ el log te lo recuerda.
   ⏰ con botones "Done" / "Snooze 1 h" en Telegram.
 - **Libros**: 📎 en la PWA, un documento en Telegram, o copia el archivo a `vault/Library/_inbox/`.
   Luego `/books`, `/reading <n> [capítulo]`, `/anki <n>`.
+- **Segundo cerebro**: "apunta esta idea: …", "para después: …", "guarda esto" o simplemente un link
+  o una foto. "No, es para después" cambia el tipo de lo último que guardaste; "olvida el link de …"
+  lo borra; "¿qué tengo guardado sobre …?" lo busca. Las notas quedan en `vault/Brain/`. Si Instagram
+  cambia y los reels dejan de bajar: `docker compose exec app python -m laika.admin update-ytdlp`.
 - **Mantenimiento**: tras reiniciar `llm`, ejecuta `docker compose exec app python -m laika.admin warm`.
   `admin nightly` y `admin consolidate` fuerzan el sueño y la consolidación.
 
@@ -232,6 +243,8 @@ En corto (todo en [`docs/memory.md`](docs/memory.md)):
 | Telegram no responde | Token o ID equivocados; revisa `docker compose logs app`. Al arrancar, un fallo de DNS en `set_my_commands` es inofensivo. |
 | No llega un recordatorio | `docker compose logs app \| grep reminder`; si no había Telegram ni app abierta, queda pendiente y se reintenta. |
 | La memoria no encuentra algo | `scripts/memory_eval.py` corre un set de pruebas sobre una copia de la base. |
+| Un reel no se guarda | Algunos piden sesión en Instagram (no se puede); si fallan todos, `admin update-ytdlp`. |
+| Un PDF se queda en "ocr_pending" | Tiene páginas escaneadas: el OCR corre cuando llevas 2 min sin escribir. |
 | Ventilador muy fuerte al generar | La CPU trabaja los expertos MoE: mejora la refrigeración o limita la frecuencia. |
 
 Logs: `docker compose logs -f app` (y `llm`, `voice`, `embed`). Salud: `curl 127.0.0.1:3010/health`.
@@ -240,7 +253,8 @@ Logs: `docker compose logs -f app` (y `llm`, `voice`, `embed`). Salud: `curl 127
 
 ```bash
 for t in test_engine test_render test_memory test_consolidate test_edits test_recall \
-         test_reminders test_api test_areas test_telegram_user; do
+         test_reminders test_api test_areas test_telegram_user test_library test_summaries test_books \
+         test_sb0 test_brain test_brain_api test_links test_sb3 test_sb5 test_sb6; do
   docker run --rm -v "$PWD/app:/app:ro" -e PYTHONDONTWRITEBYTECODE=1 -w /app local/laika-app:0.1 python -m tests.$t
 done
 ```
@@ -248,7 +262,8 @@ done
 ## Documentación
 
 - [`docs/architecture.md`](docs/architecture.md): servicios, flujo de un mensaje, decisiones técnicas.
-- [`docs/memory.md`](docs/memory.md): el modelo de memoria, áreas, tiempo, recordatorios, Obsidian.
+- [`docs/memory.md`](docs/memory.md): el modelo de memoria, áreas, tiempo, recordatorios, el segundo
+  cerebro, Obsidian.
 - [`docs/API.md`](docs/API.md): HTTP y WebSocket (lo que usan la PWA y laika-app).
 - [`llama/BUILD.md`](llama/BUILD.md): compilar llama.cpp para tu GPU.
 - [`CLAUDE.md`](CLAUDE.md): notas para sesiones futuras de Claude Code en este repo.

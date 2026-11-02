@@ -71,6 +71,11 @@ class TelegramUserChannel:
                 await self.voice.receive_note("telegram", data, "voice.ogg", meta={"tg_id": m.id})
         elif self.library and m.document and m.file and m.file.name and not (m.sticker or m.gif or m.video):
             await self.on_document(m)  # a book or file for the library (P4.1)
+        elif self.library and m.photo:  # SB5: a screenshot or photo for his second brain
+            await self.library.add(await self.client.download_media(m, file=bytes), f"foto-{m.id}.jpg", "telegram",
+                                   "telegram", meta={"caption": m.message} if m.message else None)
+            if m.message:
+                await self.engine.receive("telegram", m.message, meta={"tg_id": m.id})
         elif m.message:
             await self.engine.receive("telegram", m.message, meta={"tg_id": m.id})
 
@@ -80,7 +85,7 @@ class TelegramUserChannel:
             await self.library.say("telegram", TOO_BIG.format(limit=limit // 2**20))
         else:
             await self.library.add(await self.client.download_media(m, file=bytes), m.file.name, "telegram",
-                                   "telegram")
+                                   "telegram", meta={"caption": m.message} if m.message else None)
         if m.message:
             await self.engine.receive("telegram", m.message, meta={"tg_id": m.id})
 
